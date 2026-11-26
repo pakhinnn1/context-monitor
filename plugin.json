@@ -1,0 +1,12 @@
+{
+  "name": "context-monitor",
+  "displayName": "Context Monitor",
+  "version": "0.1.0",
+  "description": "Inspect local Antigravity conversation context usage, cached prompt tokens, compaction checkpoints, and configured MCP tool inventory in the side panel or sidebar.",
+  "logo": "assets/logo.svg",
+  "suggestedPrompts": [
+    "Open the Context Monitor panel for this conversation",
+    "Show context usage and compaction checkpoints for my latest thread",
+    "Check how many local MCP tool schemas are configured"
+  ]
+}
