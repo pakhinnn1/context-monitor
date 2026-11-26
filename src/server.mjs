@@ -60,7 +60,7 @@ function formatSummaryText(snapshot) {
 
 const server = new McpServer({
   name: "context-monitor",
-  version: "0.1.0",
+  version: "0.1.1",
 });
 
 registerAppResource(

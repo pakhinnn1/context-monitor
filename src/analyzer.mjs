@@ -185,7 +185,8 @@ function extractRequestSnippet(content) {
     .map((ln) => ln.trim())
     .find((ln) => ln.length > 0 && !ln.startsWith("<"));
   if (!firstLine) return null;
-  return firstLine.length > 68 ? `${firstLine.slice(0, 67)}…` : firstLine;
+  const normalized = firstLine.replace(/\s+/g, " ");
+  return normalized.length > 240 ? `${normalized.slice(0, 239)}…` : normalized;
 }
 
 async function fetchConversationServiceTitles(limit = 50) {
@@ -288,6 +289,37 @@ function allocateProportionally(total, weights) {
   return result;
 }
 
+function allocatePercentageTenths(items, totalTenths) {
+  const result = Object.fromEntries(items.map((item) => [item.key, 0]));
+  const positive = items.filter((item) => item.rawTenths > 0);
+  if (totalTenths <= 0 || positive.length === 0) return result;
+
+  const remainders = [];
+  let assigned = 0;
+  for (let i = 0; i < positive.length; i += 1) {
+    const item = positive[i];
+    const floored = Math.floor(item.rawTenths);
+    result[item.key] = floored;
+    assigned += floored;
+    remainders.push({
+      key: item.key,
+      frac: item.rawTenths - floored,
+      rawTenths: item.rawTenths,
+      idx: i,
+    });
+  }
+
+  const leftover = Math.max(0, totalTenths - assigned);
+  remainders.sort(
+    (a, b) => b.frac - a.frac || b.rawTenths - a.rawTenths || a.idx - b.idx,
+  );
+  for (let i = 0; i < leftover; i += 1) {
+    const target = remainders[i % remainders.length];
+    result[target.key] += 1;
+  }
+  return result;
+}
+
 function loadBestTranscriptRows(conversationId, compactPath) {
   const fullPath = path.join(
     BRAIN_DIR,
@@ -373,6 +405,7 @@ function analyzeTranscriptRows(conversationId, rows, mtimeIso, titleOverride, ru
         turnCount: 0,
         checkpointCount,
         freeTokens: null,
+        freePercent: null,
         usedPercent: null,
       },
       segments: [],
@@ -493,17 +526,12 @@ function analyzeTranscriptRows(conversationId, rows, mtimeIso, titleOverride, ru
   const toolOutputsTokens = allocated.toolOutputs;
   const systemMessagesTokens = allocated.systemMessages;
 
-  const pctOfWindow = (tokens) =>
-    contextWindow !== null && contextWindow > 0
-      ? Math.round((tokens / contextWindow) * 1000) / 10
-      : null;
-
-  const segments = [
+  const rawSegments = [
     {
       id: "baseline",
       label: "System & baseline",
       tokens: baselineEst,
-      percent: pctOfWindow(baselineEst),
+      percent: null,
       colorKey: "blue",
       kind: "estimated",
       detail:
@@ -513,7 +541,7 @@ function analyzeTranscriptRows(conversationId, rows, mtimeIso, titleOverride, ru
       id: "tool_outputs",
       label: "Tool outputs",
       tokens: toolOutputsTokens,
-      percent: pctOfWindow(toolOutputsTokens),
+      percent: null,
       colorKey: "orange",
       kind: "estimated",
       detail:
@@ -525,7 +553,7 @@ function analyzeTranscriptRows(conversationId, rows, mtimeIso, titleOverride, ru
       id: "messages",
       label: "Messages",
       tokens: messagesTokens,
-      percent: pctOfWindow(messagesTokens),
+      percent: null,
       colorKey: "green",
       kind: "estimated",
       detail:
@@ -534,29 +562,63 @@ function analyzeTranscriptRows(conversationId, rows, mtimeIso, titleOverride, ru
   ];
 
   if (checkpointSummaryEst > 0) {
-    segments.push({
+    rawSegments.push({
       id: "checkpoint_summary",
       label: "Checkpoint summary",
       tokens: checkpointSummaryEst,
-      percent: pctOfWindow(checkpointSummaryEst),
-      colorKey: "amber",
+      percent: null,
+      colorKey: "violet",
       kind: "estimated",
       detail: `Local estimate of compacted conversation history carried forward after ${checkpointCount} checkpoint${checkpointCount === 1 ? "" : "s"}.`,
     });
   }
 
   if (systemMessagesTokens > 0) {
-    segments.push({
+    rawSegments.push({
       id: "system_messages",
       label: "System messages",
       tokens: systemMessagesTokens,
-      percent: pctOfWindow(systemMessagesTokens),
+      percent: null,
       colorKey: "slate",
       kind: "estimated",
       detail:
         "Local estimate allocating transcript system notifications and error messages in the active window.",
     });
   }
+
+  let freePercent = null;
+  let adjustedUsedPercent = usedPercent;
+  if (contextWindow !== null && contextWindow > 0) {
+    if (activeTokens <= contextWindow) {
+      const allocItems = [
+        ...rawSegments.map((seg) => ({
+          key: seg.id,
+          rawTenths: (seg.tokens / contextWindow) * 1000,
+        })),
+        { key: "free", rawTenths: ((freeTokens || 0) / contextWindow) * 1000 },
+      ];
+      const tenths = allocatePercentageTenths(allocItems, 1000);
+      for (const seg of rawSegments) {
+        seg.percent = tenths[seg.id] / 10;
+      }
+      freePercent = tenths.free / 10;
+      adjustedUsedPercent = (1000 - tenths.free) / 10;
+    } else {
+      const usedTenths = Math.round((activeTokens / contextWindow) * 1000);
+      const allocItems = rawSegments.map((seg) => ({
+        key: seg.id,
+        rawTenths: (seg.tokens / contextWindow) * 1000,
+      }));
+      const tenths = allocatePercentageTenths(allocItems, usedTenths);
+      for (const seg of rawSegments) {
+        seg.percent = tenths[seg.id] / 10;
+      }
+      freePercent = 0;
+      adjustedUsedPercent = usedTenths / 10;
+    }
+  }
+
+  const segments = rawSegments;
 
   return {
     conversationId,
@@ -576,7 +638,8 @@ function analyzeTranscriptRows(conversationId, rows, mtimeIso, titleOverride, ru
       turnCount,
       checkpointCount,
       freeTokens,
-      usedPercent,
+      freePercent,
+      usedPercent: adjustedUsedPercent,
     },
     segments,
     hasUsageData: true,

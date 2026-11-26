@@ -8,9 +8,43 @@
     <style>/* __INLINE_CSS__ */</style>
   </head>
   <body>
-    <main class="panel" id="app" aria-live="polite">
-      <div class="empty-state">Loading context usage…</div>
+    <main class="panel" id="app" aria-busy="true">
+      <header class="header">
+        <div class="header-left">
+          <h1 class="title">Context</h1>
+        </div>
+        <div class="header-actions" aria-hidden="true">
+          <span class="skel skel-icon"></span>
+          <span class="skel skel-icon"></span>
+        </div>
+      </header>
+      <div class="skeleton-panel" aria-hidden="true">
+        <div class="thread-bar">
+          <div class="skel skel-select"></div>
+          <div class="skel skel-meta"></div>
+        </div>
+        <div class="usage-block">
+          <div class="usage-summary">
+            <span class="skel skel-hero"></span>
+            <span class="skel skel-fraction"></span>
+          </div>
+          <div class="skel skel-bar"></div>
+        </div>
+        <div class="rows">
+          <div class="skel-row"><span class="skel skel-swatch"></span><span class="skel skel-label"></span><span class="skel skel-val"></span></div>
+          <div class="skel-row"><span class="skel skel-swatch"></span><span class="skel skel-label skel-w-md"></span><span class="skel skel-val"></span></div>
+          <div class="skel-row"><span class="skel skel-swatch"></span><span class="skel skel-label skel-w-sm"></span><span class="skel skel-val"></span></div>
+          <div class="skel-row"><span class="skel skel-swatch"></span><span class="skel skel-label skel-w-lg"></span><span class="skel skel-val"></span></div>
+          <div class="skel-row"><span class="skel skel-swatch"></span><span class="skel skel-label skel-w-sm"></span><span class="skel skel-val"></span></div>
+        </div>
+        <div class="drawers">
+          <div class="skel skel-drawer"></div>
+          <div class="skel skel-drawer"></div>
+          <div class="skel skel-drawer"></div>
+        </div>
+      </div>
     </main>
+    <div id="status-live" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
     <script type="module">/* __INLINE_JS__ */</script>
   </body>
 </html>
