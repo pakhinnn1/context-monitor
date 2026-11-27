@@ -40,10 +40,7 @@ export async function buildBundles(
     legalComments: "none",
   });
 
-  const htmlTemplate = fs.readFileSync(
-    path.join(rootDir, "src", "ui", "index.html"),
-    "utf8",
-  );
+  const htmlTemplate = fs.readFileSync(path.join(rootDir, "src", "ui", "index.html"), "utf8");
 
   // Escape </script> inside inlined JS just in case
   const safeJs = uiJsResult.outputFiles[0].text.replace(/<\/script>/gi, "<\\/script>");

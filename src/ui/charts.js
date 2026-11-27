@@ -7,8 +7,7 @@ const PLOT_H = SVG_H;
 
 export function formatTrajectoryReadout(pt) {
   if (!pt) return "—";
-  const cachePct =
-    pt.activeTokens > 0 ? (pt.cacheReadTokens / pt.activeTokens) * 100 : 0;
+  const cachePct = pt.activeTokens > 0 ? (pt.cacheReadTokens / pt.activeTokens) * 100 : 0;
   const kindTag =
     pt.kind === "checkpoint_peak"
       ? " · Checkpoint peak"
@@ -83,15 +82,12 @@ export function renderTrajectoryChart(trajectory, contextWindow, activeIdx = nul
 
   const geom = computeTrajectoryGeometry(trajectory, contextWindow);
   const { coords, maxY } = geom;
-  const isScrubbing =
-    activeIdx !== null && activeIdx >= 0 && activeIdx < coords.length;
+  const isScrubbing = activeIdx !== null && activeIdx >= 0 && activeIdx < coords.length;
   const focusIdx = isScrubbing ? activeIdx : coords.length - 1;
   const focusCoord = coords[focusIdx];
   const readoutText = formatTrajectoryReadout(focusCoord.pt);
 
-  const activePoly = coords
-    .map((c) => `${c.x.toFixed(1)},${c.yActive.toFixed(1)}`)
-    .join(" ");
+  const activePoly = coords.map((c) => `${c.x.toFixed(1)},${c.yActive.toFixed(1)}`).join(" ");
 
   const firstX = coords[0].x.toFixed(1);
   const lastX = coords[coords.length - 1].x.toFixed(1);

@@ -102,9 +102,7 @@ export function packageRelease({
       .filter(Boolean);
     validateReleaseZipEntries(entries);
 
-    const validation = validateFn
-      ? validateFn(zipPath)
-      : runAgyStrictValidate(zipPath, agyBin);
+    const validation = validateFn ? validateFn(zipPath) : runAgyStrictValidate(zipPath, agyBin);
 
     const digest = crypto.createHash("sha256").update(fs.readFileSync(zipPath)).digest("hex");
     const shaPath = `${zipPath}.sha256`;

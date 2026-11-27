@@ -107,9 +107,7 @@ const summaryCache = new Map();
 
 export function resolvePaths({ geminiHome } = {}) {
   const resolvedGeminiHome =
-    geminiHome ||
-    process.env.CONTEXT_MONITOR_GEMINI_HOME ||
-    path.join(os.homedir(), ".gemini");
+    geminiHome || process.env.CONTEXT_MONITOR_GEMINI_HOME || path.join(os.homedir(), ".gemini");
   const antigravityDir = path.join(resolvedGeminiHome, "antigravity");
   const configDir = path.join(resolvedGeminiHome, "config");
   return {
@@ -283,16 +281,16 @@ export async function fetchConversationServiceTitles(maxCount = 200) {
       if (!res.ok) {
         return page1Succeeded
           ? { map, status: { reachable: true, reason: "partial", enrichedCount: map.size } }
-          : { map: new Map(), status: { reachable: false, reason: "http_error", enrichedCount: 0 } };
+          : {
+              map: new Map(),
+              status: { reachable: false, reason: "http_error", enrichedCount: 0 },
+            };
       }
 
       const data = await res.json();
       for (const conv of data.conversations || []) {
         if (!conv?.id) continue;
-        const title =
-          conv.annotations?.title?.trim() ||
-          conv.state?.summary?.trim() ||
-          null;
+        const title = conv.annotations?.title?.trim() || conv.state?.summary?.trim() || null;
         map.set(conv.id, {
           title,
           runState: conv.state?.runState || null,
@@ -315,7 +313,10 @@ export async function fetchConversationServiceTitles(maxCount = 200) {
   } catch {
     return page1Succeeded
       ? { map, status: { reachable: true, reason: "partial", enrichedCount: map.size } }
-      : { map: new Map(), status: { reachable: false, reason: "timeout_or_network", enrichedCount: 0 } };
+      : {
+          map: new Map(),
+          status: { reachable: false, reason: "timeout_or_network", enrichedCount: 0 },
+        };
   } finally {
     clearTimeout(timeout);
   }
@@ -410,9 +411,7 @@ function allocatePercentageTenths(items, totalTenths) {
   }
 
   const leftover = Math.max(0, totalTenths - assigned);
-  remainders.sort(
-    (a, b) => b.frac - a.frac || b.rawTenths - a.rawTenths || a.idx - b.idx,
-  );
+  remainders.sort((a, b) => b.frac - a.frac || b.rawTenths - a.rawTenths || a.idx - b.idx);
   for (let i = 0; i < leftover; i += 1) {
     const target = remainders[i % remainders.length];
     result[target.key] += 1;
@@ -533,10 +532,7 @@ function buildTrajectory(plannerTurns, checkpointIndices) {
     );
     if (activePoints.length > TRAJECTORY_ACTIVE_EPOCH_CAP) {
       isBounded = true;
-      activePoints = [
-        activePoints[0],
-        ...activePoints.slice(-(TRAJECTORY_ACTIVE_EPOCH_CAP - 1)),
-      ];
+      activePoints = [activePoints[0], ...activePoints.slice(-(TRAJECTORY_ACTIVE_EPOCH_CAP - 1))];
     }
     for (const point of activePoints) {
       upsertPoint(point);
@@ -578,11 +574,7 @@ function buildTopTools(rows, anchorIdx, latestPlannerIdx, toolCallsTokens) {
     const genericChars = [];
     for (let j = i + 1; j <= latestPlannerIdx; j += 1) {
       const r = rows[j];
-      if (
-        r.type === "PLANNER_RESPONSE" ||
-        r.type === "USER_INPUT" ||
-        r.type === "CHECKPOINT"
-      ) {
+      if (r.type === "PLANNER_RESPONSE" || r.type === "USER_INPUT" || r.type === "CHECKPOINT") {
         break;
       }
       if (r.type === "SYSTEM_MESSAGE" || r.type === "ERROR_MESSAGE") continue;
@@ -591,9 +583,7 @@ function buildTopTools(rows, anchorIdx, latestPlannerIdx, toolCallsTokens) {
       }
     }
 
-    const callSizes = row.tool_calls.map((tc) =>
-      Math.max(1, serializedToolCallChars(tc)),
-    );
+    const callSizes = row.tool_calls.map((tc) => Math.max(1, serializedToolCallChars(tc)));
 
     if (genericChars.length === row.tool_calls.length) {
       for (let k = 0; k < row.tool_calls.length; k += 1) {
@@ -608,8 +598,7 @@ function buildTopTools(rows, anchorIdx, latestPlannerIdx, toolCallsTokens) {
       for (let k = 0; k < row.tool_calls.length; k += 1) {
         const name = row.tool_calls[k]?.name || "unknown";
         const entry = ensureTool(name);
-        const genShare =
-          totalCallSize > 0 ? (totalGeneric * callSizes[k]) / totalCallSize : 0;
+        const genShare = totalCallSize > 0 ? (totalGeneric * callSizes[k]) / totalCallSize : 0;
         entry.calls += 1;
         entry.weight += callSizes[k] + genShare;
       }
@@ -626,9 +615,7 @@ function buildTopTools(rows, anchorIdx, latestPlannerIdx, toolCallsTokens) {
     .map(([name, s]) => {
       const estTokens = allocated[name] || 0;
       const sharePercent =
-        toolCallsTokens > 0
-          ? Math.round((estTokens / toolCallsTokens) * 1000) / 10
-          : 0;
+        toolCallsTokens > 0 ? Math.round((estTokens / toolCallsTokens) * 1000) / 10 : 0;
       return {
         name,
         calls: s.calls,
@@ -670,8 +657,7 @@ export function scanConversationArtifacts(conversationId, paths = resolvePaths()
         if (typeof rawSummary === "string") {
           const collapsed = rawSummary.replace(/\s+/g, " ").trim();
           if (collapsed) {
-            summary =
-              collapsed.length > 160 ? `${collapsed.slice(0, 159)}…` : collapsed;
+            summary = collapsed.length > 160 ? `${collapsed.slice(0, 159)}…` : collapsed;
           }
         }
 
@@ -713,7 +699,12 @@ export function analyzeTranscriptRows(
   titleOverride,
   runState,
   usedFullTranscript,
-  { includeDetails = true, kind = "interactive", annotationTitle = undefined, paths = undefined } = {},
+  {
+    includeDetails = true,
+    kind = "interactive",
+    annotationTitle = undefined,
+    paths = undefined,
+  } = {},
 ) {
   let firstUserRow = null;
   const checkpointIndices = [];
@@ -733,8 +724,7 @@ export function analyzeTranscriptRows(
       prevPlannerCacheRead = null;
     } else if (row.type === "PLANNER_RESPONSE") {
       const hasTokens =
-        typeof row.input_tokens === "number" ||
-        typeof row.cache_read_tokens === "number";
+        typeof row.input_tokens === "number" || typeof row.cache_read_tokens === "number";
       const outputTokens = typeof row.output_tokens === "number" ? row.output_tokens : 0;
       if (typeof row.output_tokens === "number") {
         totalOutputTokens += row.output_tokens;
@@ -826,8 +816,7 @@ export function analyzeTranscriptRows(
   const firstPlannerIdx = firstTurn.rowIndex;
   const latestPlannerIdx = latestTurn.rowIndex;
   const latestPlanner = latestTurn.row;
-  const lastCheckpointIdx =
-    checkpointCount > 0 ? checkpointIndices[checkpointCount - 1] : -1;
+  const lastCheckpointIdx = checkpointCount > 0 ? checkpointIndices[checkpointCount - 1] : -1;
 
   let effectiveCheckpointIdx = -1;
   for (let i = checkpointIndices.length - 1; i >= 0; i -= 1) {
@@ -853,8 +842,7 @@ export function analyzeTranscriptRows(
 
   const model = resolveModelInfo(latestPlanner.model);
   const contextWindow = model.contextWindow;
-  const freeTokens =
-    contextWindow !== null ? Math.max(0, contextWindow - activeTokens) : null;
+  const freeTokens = contextWindow !== null ? Math.max(0, contextWindow - activeTokens) : null;
   const usedPercent =
     contextWindow !== null && contextWindow > 0
       ? Math.round((activeTokens / contextWindow) * 1000) / 10
@@ -915,8 +903,7 @@ export function analyzeTranscriptRows(
   }
 
   const deltaTokens = Math.max(0, activeTokens - anchorTotal);
-  const hasWeights =
-    toolCallChars + userMessageChars + agentResponseChars + systemMessageChars > 0;
+  const hasWeights = toolCallChars + userMessageChars + agentResponseChars + systemMessageChars > 0;
   const deltaWeights = hasWeights
     ? {
         toolCalls: toolCallChars,
@@ -967,8 +954,7 @@ export function analyzeTranscriptRows(
       percent: null,
       colorKey: "green",
       kind: "estimated",
-      detail:
-        "Local estimate covering user prompt text in the active context window.",
+      detail: "Local estimate covering user prompt text in the active context window.",
     },
     {
       id: "agent_responses",
@@ -1114,8 +1100,7 @@ function summarizeConversationFast(
             const obj = JSON.parse(line);
             if (
               obj.type === "PLANNER_RESPONSE" &&
-              (typeof obj.input_tokens === "number" ||
-                typeof obj.cache_read_tokens === "number")
+              (typeof obj.input_tokens === "number" || typeof obj.cache_read_tokens === "number")
             ) {
               latestPlanner = obj;
               turnCount += 1;
@@ -1128,8 +1113,7 @@ function summarizeConversationFast(
     }
 
     const activeTokens = latestPlanner
-      ? Number(latestPlanner.input_tokens || 0) +
-        Number(latestPlanner.cache_read_tokens || 0)
+      ? Number(latestPlanner.input_tokens || 0) + Number(latestPlanner.cache_read_tokens || 0)
       : 0;
     const model = resolveModelInfo(latestPlanner?.model || null);
     const usedPercent =
@@ -1155,10 +1139,7 @@ function summarizeConversationFast(
   const ann = readAnnotationInfo(conversationId, paths);
   const kind = classifyConversationKind(ann.exists, serviceInfo);
   const title =
-    serviceInfo?.title ||
-    ann.title ||
-    base.requestTitle ||
-    `Thread ${conversationId.slice(0, 8)}`;
+    serviceInfo?.title || ann.title || base.requestTitle || `Thread ${conversationId.slice(0, 8)}`;
 
   return {
     conversationId,
@@ -1218,11 +1199,7 @@ function resolveProjectWorkspacePath(projectJson) {
   const resources = projectJson?.projectResources?.resources;
   if (!Array.isArray(resources)) return null;
   for (const res of resources) {
-    const uri =
-      res?.gitFolder?.folderUri ||
-      res?.localFolder?.folderUri ||
-      res?.folderUri ||
-      null;
+    const uri = res?.gitFolder?.folderUri || res?.localFolder?.folderUri || res?.folderUri || null;
     const resolved = resolveFileUriWorkspace(uri);
     if (resolved) return resolved;
   }
@@ -1265,10 +1242,7 @@ export function listKnownWorkspaces(paths = resolvePaths()) {
     .map(({ id, name, path: wsPath }) => ({ id, name, path: wsPath }));
 }
 
-function resolveWorkspaceRoot(
-  { workspacePath, mcpRoots, projectId, savedWorkspacePath },
-  paths,
-) {
+function resolveWorkspaceRoot({ workspacePath, mcpRoots, projectId, savedWorkspacePath }, paths) {
   const argWorkspace = validateWorkspaceDir(workspacePath);
   if (argWorkspace) {
     return { path: argWorkspace, source: "arg" };
@@ -1354,9 +1328,7 @@ export function scanLocalInventory({
   const paths = resolvePaths({ geminiHome });
   const configJson = readJsonSafe(path.join(paths.configDir, "config.json")) || {};
   const pluginConfigs =
-    configJson?.plugins && typeof configJson.plugins === "object"
-      ? configJson.plugins
-      : {};
+    configJson?.plugins && typeof configJson.plugins === "object" ? configJson.plugins : {};
 
   // 1. Discover configured MCP server names from global config + installed plugins
   const configuredServers = new Set();
@@ -1380,10 +1352,7 @@ export function scanLocalInventory({
       let enabled;
       if (typeof pluginConfigs[entry.name]?.enabled === "boolean") {
         enabled = pluginConfigs[entry.name].enabled;
-      } else if (
-        pluginJson?.name &&
-        typeof pluginConfigs[pluginJson.name]?.enabled === "boolean"
-      ) {
+      } else if (pluginJson?.name && typeof pluginConfigs[pluginJson.name]?.enabled === "boolean") {
         enabled = pluginConfigs[pluginJson.name].enabled;
       } else {
         enabled = !pluginJson?.disabled;
@@ -1466,8 +1435,16 @@ export function scanLocalInventory({
   // Global rule files
   const rules = [...pluginRules];
   for (const candidate of [
-    { name: "~/.gemini/GEMINI.md", filePath: path.join(paths.geminiHome, "GEMINI.md"), scope: "global" },
-    { name: "~/.gemini/config/AGENTS.md", filePath: path.join(paths.configDir, "AGENTS.md"), scope: "global" },
+    {
+      name: "~/.gemini/GEMINI.md",
+      filePath: path.join(paths.geminiHome, "GEMINI.md"),
+      scope: "global",
+    },
+    {
+      name: "~/.gemini/config/AGENTS.md",
+      filePath: path.join(paths.configDir, "AGENTS.md"),
+      scope: "global",
+    },
   ]) {
     try {
       const st = fs.statSync(candidate.filePath);
@@ -1518,10 +1495,7 @@ export function scanLocalInventory({
       try {
         for (const rf of fs.readdirSync(wsRulesDir)) {
           if (!rf.endsWith(".md")) continue;
-          const resolved = resolveInsideWorkspace(
-            workspace.path,
-            path.join(wsRulesDir, rf),
-          );
+          const resolved = resolveInsideWorkspace(workspace.path, path.join(wsRulesDir, rf));
           if (resolved && !seenRuleRealPaths.has(resolved.real)) {
             seenRuleRealPaths.add(resolved.real);
             rules.push({
@@ -1626,9 +1600,7 @@ export function scanLocalInventory({
     global: skills.filter((s) => s.scope === "global").length,
     builtin: skills.filter((s) => s.scope === "builtin").length,
   };
-  skills.sort(
-    (a, b) => b.estIndexTokens - a.estIndexTokens || a.name.localeCompare(b.name),
-  );
+  skills.sort((a, b) => b.estIndexTokens - a.estIndexTokens || a.name.localeCompare(b.name));
 
   return {
     workspace,
@@ -1665,13 +1637,7 @@ function scanBrainTranscripts(paths) {
       if (!dirent.isDirectory()) continue;
       const cid = dirent.name;
       if (!isSafeSingleSegment(cid)) continue;
-      const tPath = path.join(
-        paths.brainDir,
-        cid,
-        ".system_generated",
-        "logs",
-        "transcript.jsonl",
-      );
+      const tPath = path.join(paths.brainDir, cid, ".system_generated", "logs", "transcript.jsonl");
       try {
         const st = fs.statSync(tPath);
         if (st.isFile() && st.size > 0) {
@@ -1730,10 +1696,7 @@ export async function getContextSnapshot({
     for (const entry of transcriptEntries) {
       const pbtxtPath = path.join(paths.annotationsDir, `${entry.conversationId}.pbtxt`);
       const hasAnnotation = fs.existsSync(pbtxtPath);
-      const kind = classifyConversationKind(
-        hasAnnotation,
-        serviceMap.get(entry.conversationId),
-      );
+      const kind = classifyConversationKind(hasAnnotation, serviceMap.get(entry.conversationId));
       if (kind !== "interactive") continue;
       candidateEntries.push(entry);
       if (candidateEntries.length >= safeLimit) break;
@@ -1760,8 +1723,7 @@ export async function getContextSnapshot({
     if (!validRequestedId) {
       requestedConversationFound = false;
     } else {
-      selectedEntry =
-        transcriptEntries.find((e) => e.conversationId === conversationId) || null;
+      selectedEntry = transcriptEntries.find((e) => e.conversationId === conversationId) || null;
       if (!selectedEntry) {
         requestedConversationFound = false;
       }
@@ -1968,9 +1930,7 @@ export async function listConversations({
         a.conversationId.localeCompare(b.conversationId),
     );
   } else {
-    pool.sort(
-      (a, b) => b.mtimeMs - a.mtimeMs || a.conversationId.localeCompare(b.conversationId),
-    );
+    pool.sort((a, b) => b.mtimeMs - a.mtimeMs || a.conversationId.localeCompare(b.conversationId));
   }
 
   const items = pool.slice(safeOffset, safeOffset + safeLimit);

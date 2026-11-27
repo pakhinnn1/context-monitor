@@ -10,16 +10,8 @@ import {
   RESOURCE_MIME_TYPE,
 } from "@modelcontextprotocol/ext-apps/server";
 import { z } from "zod";
-import {
-  getContextSnapshot,
-  listConversations,
-  validateWorkspaceDir,
-} from "./analyzer.mjs";
-import {
-  loadPreferences,
-  resolveDataDir,
-  savePreferences,
-} from "./preferences.mjs";
+import { getContextSnapshot, listConversations, validateWorkspaceDir } from "./analyzer.mjs";
+import { loadPreferences, resolveDataDir, savePreferences } from "./preferences.mjs";
 
 const APP_URI = "ui://context-monitor/app.html";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -52,9 +44,7 @@ function loadAppHtml() {
       // Try next candidate
     }
   }
-  throw new Error(
-    `Context Monitor UI HTML not found. Checked: ${candidates.join(", ")}`,
-  );
+  throw new Error(`Context Monitor UI HTML not found. Checked: ${candidates.join(", ")}`);
 }
 
 async function resolveMcpRoots(mcpServer, { workspacePath } = {}) {
@@ -176,15 +166,11 @@ registerAppTool(
       workspacePath: z
         .string()
         .optional()
-        .describe(
-          "Optional workspace root path for discovering project rules and skills.",
-        ),
+        .describe("Optional workspace root path for discovering project rules and skills."),
       includeSubagents: z
         .boolean()
         .optional()
-        .describe(
-          "Include subagent and background worker threads in the conversation list.",
-        ),
+        .describe("Include subagent and background worker threads in the conversation list."),
     },
     annotations: {
       readOnlyHint: true,
@@ -206,8 +192,7 @@ registerAppTool(
   },
   async (args) => {
     const mcpRootsPromise = resolveMcpRoots(server, args);
-    const includeSubagents =
-      args?.includeSubagents ?? currentPreferences.includeSubagents;
+    const includeSubagents = args?.includeSubagents ?? currentPreferences.includeSubagents;
     const snapshot = await getContextSnapshot({
       conversationId: args?.conversationId,
       workspacePath: args?.workspacePath,
@@ -255,8 +240,7 @@ registerAppTool(
   },
   async (args) => {
     const mcpRootsPromise = resolveMcpRoots(server, args);
-    const includeSubagents =
-      args?.includeSubagents ?? currentPreferences.includeSubagents;
+    const includeSubagents = args?.includeSubagents ?? currentPreferences.includeSubagents;
     const snapshot = await getContextSnapshot({
       conversationId: args?.conversationId,
       workspacePath: args?.workspacePath,
@@ -290,9 +274,7 @@ registerAppTool(
       query: z.string().optional(),
       kind: z.enum(["interactive", "all", "subagent", "background"]).optional(),
       filter: z.enum(["all", "high_usage", "checkpointed", "running"]).optional(),
-      sort: z
-        .enum(["recent", "usage_desc", "tokens_desc", "checkpoints_desc"])
-        .optional(),
+      sort: z.enum(["recent", "usage_desc", "tokens_desc", "checkpoints_desc"]).optional(),
       offset: z.number().int().min(0).optional(),
       limit: z.number().int().min(1).max(100).optional(),
     },

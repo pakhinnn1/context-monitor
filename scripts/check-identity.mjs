@@ -37,7 +37,9 @@ export function checkIdentity({
   const localEmail = execFileSync("git", ["-C", cwd, "config", "--local", "user.email"], {
     encoding: "utf8",
   }).trim();
-  const noreplyRe = new RegExp(`^\\d+\\+${escapeRegex(expectedUser)}@users\\.noreply\\.github\\.com$`);
+  const noreplyRe = new RegExp(
+    `^\\d+\\+${escapeRegex(expectedUser)}@users\\.noreply\\.github\\.com$`,
+  );
   if (!noreplyRe.test(localEmail)) {
     throw new Error(
       `Local git user.email must match <id>+${expectedUser}@users.noreply.github.com, got "${localEmail}"`,
@@ -48,7 +50,9 @@ export function checkIdentity({
     encoding: "utf8",
   }).trim();
   if (remoteUrl !== expectedRemoteUrl) {
-    throw new Error(`Remote origin URL mismatch: expected "${expectedRemoteUrl}", got "${remoteUrl}"`);
+    throw new Error(
+      `Remote origin URL mismatch: expected "${expectedRemoteUrl}", got "${remoteUrl}"`,
+    );
   }
 
   let token = "";

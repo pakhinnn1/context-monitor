@@ -1,8 +1,4 @@
-import {
-  App,
-  applyDocumentTheme,
-  applyHostStyleVariables,
-} from "@modelcontextprotocol/ext-apps";
+import { App, applyDocumentTheme, applyHostStyleVariables } from "@modelcontextprotocol/ext-apps";
 import { z } from "zod";
 import {
   computeTrajectoryGeometry,
@@ -22,16 +18,9 @@ import {
   formatWorkspaceLabel,
   shortenPath,
 } from "./format.js";
-import {
-  renderFleetKpis,
-  renderRailFooter,
-  renderRailList,
-  renderRailShell,
-} from "./rail.js";
+import { renderFleetKpis, renderRailFooter, renderRailList, renderRailShell } from "./rail.js";
 
-const ToggleAuxPaneResultSchema = z
-  .object({ isError: z.boolean().optional() })
-  .passthrough();
+const ToggleAuxPaneResultSchema = z.object({ isError: z.boolean().optional() }).passthrough();
 
 const rootEl = document.getElementById("app");
 const statusLiveEl = document.getElementById("status-live");
@@ -136,9 +125,7 @@ function canAttachModelContext() {
 
 function canOpenAuxFile() {
   const caps = getHostCaps();
-  return (
-    Boolean(caps?.updateModelContext || caps?.message) && !auxPaneOpenUnsupported
-  );
+  return Boolean(caps?.updateModelContext || caps?.message) && !auxPaneOpenUnsupported;
 }
 
 function isDrawerOpen(drawerId) {
@@ -215,9 +202,7 @@ function setupHintFallbackAndAria() {
       if (!target.id || !target.hasAttribute("popover")) return;
 
       const isOpen = event.newState === "open";
-      const triggers = document.querySelectorAll(
-        `[interestfor="${CSS.escape(target.id)}"]`,
-      );
+      const triggers = document.querySelectorAll(`[interestfor="${CSS.escape(target.id)}"]`);
       for (const trigger of triggers) {
         if (managedTriggers.has(trigger)) {
           trigger.setAttribute("aria-expanded", String(isOpen));
@@ -261,9 +246,7 @@ function wireInterestHints(container) {
 
     if (opensOnActivation) {
       if (!trigger.hasAttribute("aria-expanded")) {
-        const isOpen =
-          hint.matches?.(":popover-open") ||
-          hint.classList.contains(":popover-open");
+        const isOpen = hint.matches?.(":popover-open") || hint.classList.contains(":popover-open");
         trigger.setAttribute("aria-expanded", String(Boolean(isOpen)));
       }
       managedTriggers.add(trigger);
@@ -395,19 +378,11 @@ function computeStructureKey(snapshot, error) {
     kind: current?.kind || null,
     hasUsageData: Boolean(current?.hasUsageData),
     hasWindow:
-      current?.model?.contextWindow !== null &&
-      current?.model?.contextWindow !== undefined,
+      current?.model?.contextWindow !== null && current?.model?.contextWindow !== undefined,
     compactions: (current?.exact?.checkpointCount || 0) > 0,
-    segments: (current?.segments || [])
-      .filter((s) => s.tokens > 0)
-      .map((s) => s.id),
+    segments: (current?.segments || []).filter((s) => s.tokens > 0).map((s) => s.id),
     trajKey: current?.trajectory
-      ? [
-          trajPoints.length,
-          lastTraj?.turn,
-          lastTraj?.activeTokens,
-          lastTraj?.cacheReadTokens,
-        ]
+      ? [trajPoints.length, lastTraj?.turn, lastTraj?.activeTokens, lastTraj?.cacheReadTokens]
       : "none",
     topToolNames: (current?.topTools || []).map((t) => t.name),
     artifactNames: (current?.artifacts?.items || []).map((a) => a.name),
@@ -455,8 +430,7 @@ function computeMetrics(snapshot) {
   const { current, inventory } = snapshot;
   const exact = current?.exact;
   const model = current?.model;
-  const hasWindow =
-    model?.contextWindow !== null && model?.contextWindow !== undefined;
+  const hasWindow = model?.contextWindow !== null && model?.contextWindow !== undefined;
 
   const usedHeadline =
     exact && exact.usedPercent !== null
@@ -477,10 +451,10 @@ function computeMetrics(snapshot) {
 
   const freePct =
     hasWindow && current?.hasUsageData
-      ? exact.freePercent ??
+      ? (exact.freePercent ??
         (model.contextWindow > 0
           ? Math.max(0, ((exact.freeTokens || 0) / model.contextWindow) * 100)
-          : null)
+          : null))
       : null;
 
   const mcpInfo = inventory?.mcp;
@@ -564,10 +538,7 @@ function updateTrajectoryScrub(idx, { scrubbing = false } = {}) {
   }
 }
 
-function resetTrajectoryScrub({
-  flushPending = true,
-  nextActiveEl = document.activeElement,
-} = {}) {
+function resetTrajectoryScrub({ flushPending = true, nextActiveEl = document.activeElement } = {}) {
   isTrajectoryPointerScrubbing = false;
   isTrajectoryKeyScrubbing = false;
   activeTrajectoryDragPointerId = null;
@@ -677,9 +648,7 @@ function renderArtifactsContent(artifacts) {
     <ul class="sub-list" role="list">
       ${artifacts.items
         .map((a) => {
-          const badge = a.userFacing
-            ? `<span class="badge badge-accent">user-facing</span>`
-            : "";
+          const badge = a.userFacing ? `<span class="badge badge-accent">user-facing</span>` : "";
           const openBtn =
             allowOpen && a.fileUri
               ? `<button type="button" class="open-file-btn" data-open-file-uri="${escapeHtml(a.fileUri)}" title="Open ${escapeHtml(a.name)} in side pane" aria-label="Open ${escapeHtml(a.name)} in side pane">${renderOpenFileIcon()}</button>`
@@ -706,19 +675,14 @@ function patchRelativeTimeOnly(snapshot) {
   const updatedEl = rootEl.querySelector('[data-slot="updated-rel"]');
   if (updatedEl && snapshot?.current) {
     updatedEl.textContent =
-      formatRelativeTime(snapshot.current.lastUpdated) ||
-      snapshot.current.lastUpdated ||
-      "—";
+      formatRelativeTime(snapshot.current.lastUpdated) || snapshot.current.lastUpdated || "—";
   }
   const selectEl = document.getElementById("thread-select");
   if (selectEl && snapshot?.conversations && document.activeElement !== selectEl) {
     for (const conv of snapshot.conversations) {
-      const opt = Array.from(selectEl.options).find(
-        (o) => o.value === conv.conversationId,
-      );
+      const opt = Array.from(selectEl.options).find((o) => o.value === conv.conversationId);
       if (opt) {
-        const pctSuffix =
-          conv.usedPercent !== null ? ` (${Math.round(conv.usedPercent)}%)` : "";
+        const pctSuffix = conv.usedPercent !== null ? ` (${Math.round(conv.usedPercent)}%)` : "";
         const rel = formatRelativeTime(conv.lastUpdated);
         opt.textContent = `${conv.title}${pctSuffix}${rel ? ` · ${rel}` : ""}`;
       }
@@ -767,27 +731,19 @@ function patchInPlace(snapshot) {
 
   const trackEl = rootEl.querySelector(".bar-track");
   if (trackEl) {
-    trackEl.setAttribute(
-      "aria-label",
-      `Context usage bar: ${usedHeadline}, ${fractionText}`,
-    );
+    trackEl.setAttribute("aria-label", `Context usage bar: ${usedHeadline}, ${fractionText}`);
   }
 
   for (const seg of current?.segments || []) {
-    const barEl = rootEl.querySelector(
-      `.bar-segment[data-seg-id="${CSS.escape(seg.id)}"]`,
-    );
+    const barEl = rootEl.querySelector(`.bar-segment[data-seg-id="${CSS.escape(seg.id)}"]`);
     if (barEl && seg.tokens > 0 && denom > 0) {
       const widthPct = Math.max(0.6, (seg.tokens / denom) * 100);
       barEl.style.width = `${widthPct.toFixed(2)}%`;
       barEl.title = `${seg.label}: ${formatTokens(seg.tokens)}`;
     }
     setSlot(`seg-tok-${seg.id}`, formatTokens(seg.tokens));
-    setSlot(
-      `seg-pct-${seg.id}`,
-      seg.percent !== null ? formatPercent(seg.percent) : "—",
-    );
-    if (Boolean(seg.detail)) {
+    setSlot(`seg-pct-${seg.id}`, seg.percent !== null ? formatPercent(seg.percent) : "—");
+    if (seg.detail) {
       setTip(
         `tip-seg-${seg.id}`,
         `${seg.detail} Exact total active prompt is ${formatExactNumber(exact.activeTokens)} tokens.`,
@@ -811,10 +767,7 @@ function patchInPlace(snapshot) {
       `Exact transcript counter: ${formatExactNumber(exact.cacheReadTokens)} cached + ${formatExactNumber(exact.inputTokens)} uncached input = ${formatExactNumber(exact.activeTokens)} active tokens (${exact.cacheHitPercent}% cached).`,
     );
     setSlot("kv-active", formatExactNumber(exact.activeTokens));
-    setSlot(
-      "kv-cache",
-      `${formatExactNumber(exact.cacheReadTokens)} (${exact.cacheHitPercent}%)`,
-    );
+    setSlot("kv-cache", `${formatExactNumber(exact.cacheReadTokens)} (${exact.cacheHitPercent}%)`);
     setSlot("kv-uncached", formatExactNumber(exact.inputTokens));
     setSlot("kv-last-out", formatExactNumber(exact.lastOutputTokens));
     setSlot("kv-total-out", formatExactNumber(exact.totalOutputTokens));
@@ -824,10 +777,7 @@ function patchInPlace(snapshot) {
     setSlot("kv-compactions", String(exact.checkpointCount));
     setSlot("kv-model", model?.id || "—");
     setSlot("kv-service", formatServiceStatus(serviceStatus));
-    setSlot(
-      "updated-rel",
-      formatRelativeTime(current.lastUpdated) || current.lastUpdated || "—",
-    );
+    setSlot("updated-rel", formatRelativeTime(current.lastUpdated) || current.lastUpdated || "—");
     setSlot("exact-turns", `${exact.turnCount} turns`);
   }
 
@@ -844,28 +794,19 @@ function patchInPlace(snapshot) {
     for (const srv of mcpInfo.servers || []) {
       const totalEst = formatTokens(srv.estSchemaTokens + srv.estInstructionTokens);
       const instrNote = srv.hasInstructions ? " · instructions" : "";
-      setSlot(
-        `mcp-srv-${srv.name}`,
-        `${srv.toolCount} tools · ~${totalEst}${instrNote}`,
-      );
+      setSlot(`mcp-srv-${srv.name}`, `${srv.toolCount} tools · ~${totalEst}${instrNote}`);
     }
   }
 
   const rulesInfo = inventory?.rules;
   const skillsInfo = inventory?.skills;
   if (rulesInfo && skillsInfo) {
-    setSlot(
-      "rules-skills-tok",
-      formatTokens(rulesInfo.estTokens + skillsInfo.estIndexTokens),
-    );
+    setSlot("rules-skills-tok", formatTokens(rulesInfo.estTokens + skillsInfo.estIndexTokens));
     setSlot("rules-count", String(rulesInfo.count + skillsInfo.count));
     for (const r of rulesInfo.items || []) {
       setSlot(`rule-${r.name}`, `${r.scope} · ~${formatTokens(r.estTokens)}`);
     }
-    setSlot(
-      "skills-meta",
-      `${skillsInfo.count} (~${formatTokens(skillsInfo.estIndexTokens)})`,
-    );
+    setSlot("skills-meta", `${skillsInfo.count} (~${formatTokens(skillsInfo.estIndexTokens)})`);
     setSlot("skills-scope", formatSkillsScope(skillsInfo.byScope));
   }
 
@@ -881,12 +822,9 @@ function patchInPlace(snapshot) {
   const selectEl = document.getElementById("thread-select");
   if (selectEl && document.activeElement !== selectEl) {
     for (const conv of conversations) {
-      const opt = Array.from(selectEl.options).find(
-        (o) => o.value === conv.conversationId,
-      );
+      const opt = Array.from(selectEl.options).find((o) => o.value === conv.conversationId);
       if (opt) {
-        const pctSuffix =
-          conv.usedPercent !== null ? ` (${Math.round(conv.usedPercent)}%)` : "";
+        const pctSuffix = conv.usedPercent !== null ? ` (${Math.round(conv.usedPercent)}%)` : "";
         const rel = formatRelativeTime(conv.lastUpdated);
         opt.textContent = `${conv.title}${pctSuffix}${rel ? ` · ${rel}` : ""}`;
       }
@@ -915,7 +853,8 @@ function updateRefreshButtonState({ spinning = false, refreshed = false } = {}) 
 function renderWorkspacePicker(inventory) {
   const known = inventory?.knownWorkspaces || [];
   const ws = inventory?.workspace || { path: null, source: "none" };
-  const activeSelection = selectedWorkspacePath || (ws.source === "saved" || ws.source === "arg" ? ws.path : "");
+  const activeSelection =
+    selectedWorkspacePath || (ws.source === "saved" || ws.source === "arg" ? ws.path : "");
 
   const knownPaths = new Set(known.map((k) => k.path));
   const options = [
@@ -978,11 +917,9 @@ function buildInspectorHtml() {
   const threadOptions = conversations
     .map((conv) => {
       const selected = conv.conversationId === current?.conversationId ? " selected" : "";
-      const pctSuffix =
-        conv.usedPercent !== null ? ` (${Math.round(conv.usedPercent)}%)` : "";
+      const pctSuffix = conv.usedPercent !== null ? ` (${Math.round(conv.usedPercent)}%)` : "";
       const rel = formatRelativeTime(conv.lastUpdated);
-      const kindPrefix =
-        conv.kind && conv.kind !== "interactive" ? `[${conv.kind}] ` : "";
+      const kindPrefix = conv.kind && conv.kind !== "interactive" ? `[${conv.kind}] ` : "";
       const label = `${kindPrefix}${conv.title}${pctSuffix}${rel ? ` · ${rel}` : ""}`;
       return `<option value="${escapeHtml(conv.conversationId)}"${selected}>${escapeHtml(label)}</option>`;
     })
@@ -1148,8 +1085,7 @@ function buildInspectorHtml() {
   }
 
   const isAttached =
-    Boolean(attachedConversationId) &&
-    attachedConversationId === current?.conversationId;
+    Boolean(attachedConversationId) && attachedConversationId === current?.conversationId;
   const attachControls =
     canAttachModelContext() && current?.hasUsageData
       ? `<button type="button" id="attach-context-btn" class="pill-btn${isAttached ? " is-attached" : ""}">${isAttached ? "Attached" : "Attach context"}</button>${isAttached ? '<button type="button" id="clear-context-btn" class="pill-btn pill-btn-quiet">Clear</button>' : ""}`
@@ -1529,7 +1465,11 @@ async function handleOpenFile(uri) {
   } catch (err) {
     const code = err?.code;
     const msg = String(err?.message || "");
-    if (code === -32601 || msg.includes("-32601") || msg.toLowerCase().includes("method not found")) {
+    if (
+      code === -32601 ||
+      msg.includes("-32601") ||
+      msg.toLowerCase().includes("method not found")
+    ) {
       auxPaneOpenUnsupported = true;
       render();
     } else {
@@ -1570,10 +1510,7 @@ function bindDelegatedEvents() {
       if (railKindEl instanceof HTMLSelectElement) {
         railKindEl.value = railState.kind;
       }
-      void savePrefsAndRefresh(
-        { includeSubagents },
-        { refreshSnap: true, refreshList: true },
-      );
+      void savePrefsAndRefresh({ includeSubagents }, { refreshSnap: true, refreshList: true });
       return;
     }
 
@@ -1589,10 +1526,7 @@ function bindDelegatedEvents() {
           if (compactToggle instanceof HTMLInputElement) {
             compactToggle.checked = includeSubagents;
           }
-          void savePrefsAndRefresh(
-            { includeSubagents },
-            { refreshSnap: true, refreshList: false },
-          );
+          void savePrefsAndRefresh({ includeSubagents }, { refreshSnap: true, refreshList: false });
         }
       }
       void refreshRail({ silent: false, resetOffset: true });
@@ -1853,9 +1787,7 @@ function bindDelegatedEvents() {
     const scrubber = target.closest('[data-slot="traj-scrubber"]');
     if (scrubber && activeTrajectoryCoords && activeTrajectoryCoords.length > 0) {
       const idx =
-        activeTrajectoryIndex !== null
-          ? activeTrajectoryIndex
-          : activeTrajectoryCoords.length - 1;
+        activeTrajectoryIndex !== null ? activeTrajectoryIndex : activeTrajectoryCoords.length - 1;
       updateTrajectoryScrub(idx, { scrubbing: true });
       return;
     }
@@ -1957,7 +1889,9 @@ function bindDelegatedEvents() {
         void refreshRail({ silent: false, resetOffset: true });
         return;
       }
-      for (const pop of document.querySelectorAll("[popover]:is(:popover-open, .\\:popover-open)")) {
+      for (const pop of document.querySelectorAll(
+        "[popover]:is(:popover-open, .\\:popover-open)",
+      )) {
         try {
           pop.hidePopover?.();
         } catch {}
@@ -2031,7 +1965,7 @@ async function refreshSnapshot(conversationId, { silent = false, reason = "manua
   if (!caps?.serverTools) return;
 
   const isHydrate = reason === "hydrate";
-  const myHydrateKey = isHydrate ? (conversationId || "__default__") : null;
+  const myHydrateKey = isHydrate ? conversationId || "__default__" : null;
   if (isHydrate) {
     hydrateInFlightKey = myHydrateKey;
   }
@@ -2191,9 +2125,7 @@ function maybeHydrateMount() {
   if (!isConnected) return;
   const cur = currentSnapshot?.current;
   if (cur && cur.trajectory === undefined) {
-    const hydrateCid = hasExplicitConversationSelection
-      ? selectedConversationId
-      : null;
+    const hydrateCid = hasExplicitConversationSelection ? selectedConversationId : null;
     const nextKey = hydrateCid || "__default__";
     if (hydrateInFlightKey !== nextKey) {
       void refreshSnapshot(hydrateCid, { silent: true, reason: "hydrate" });
@@ -2244,11 +2176,7 @@ function setupResizeObserver() {
 function startPolling() {
   if (pollTimer) clearInterval(pollTimer);
   pollTimer = setInterval(() => {
-    if (
-      document.visibilityState === "visible" &&
-      !isRefreshing &&
-      !isUserInteracting()
-    ) {
+    if (document.visibilityState === "visible" && !isRefreshing && !isUserInteracting()) {
       void refreshSnapshot(selectedConversationId, { silent: true });
       if (isWideMode) {
         void refreshRail({ silent: true, resetOffset: true });
@@ -2320,10 +2248,10 @@ async function init() {
   startPolling();
 
   if (!currentSnapshot) {
-    void refreshSnapshot(
-      hasExplicitConversationSelection ? selectedConversationId : null,
-      { silent: true, reason: "hydrate" },
-    );
+    void refreshSnapshot(hasExplicitConversationSelection ? selectedConversationId : null, {
+      silent: true,
+      reason: "hydrate",
+    });
     if (isWideMode && !railLoaded) {
       void refreshRail({ silent: true, resetOffset: true });
     }

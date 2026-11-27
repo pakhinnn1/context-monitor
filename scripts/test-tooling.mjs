@@ -33,7 +33,11 @@ function createSyncedFixture(rootDir, version = "0.2.0") {
   );
   fs.writeFileSync(
     path.join(rootDir, "mcp_config.json"),
-    JSON.stringify({ mcpServers: { "context-monitor": { command: "node", args: ["${PLUGIN_ROOT}/dist/server.mjs"] } } }),
+    JSON.stringify({
+      mcpServers: {
+        "context-monitor": { command: "node", args: ["${PLUGIN_ROOT}/dist/server.mjs"] },
+      },
+    }),
   );
   fs.writeFileSync(
     path.join(rootDir, "README.md"),
@@ -107,9 +111,15 @@ describe("Tooling Suite 3: Sync target safety and atomic swap", () => {
     const home = os.homedir();
     assert.throws(() => validateSyncTarget("/", repo), /basename|unsafe/);
     assert.throws(() => validateSyncTarget(home, repo), /basename|unsafe/);
-    assert.throws(() => validateSyncTarget(path.join(home, ".gemini", "config", "plugins"), repo), /basename|unsafe/);
+    assert.throws(
+      () => validateSyncTarget(path.join(home, ".gemini", "config", "plugins"), repo),
+      /basename|unsafe/,
+    );
     assert.throws(() => validateSyncTarget("/tmp/other-name", repo), /basename/);
-    assert.throws(() => validateSyncTarget("/tmp/context-monitor", "/tmp/context-monitor"), /unsafe/);
+    assert.throws(
+      () => validateSyncTarget("/tmp/context-monitor", "/tmp/context-monitor"),
+      /unsafe/,
+    );
   });
 
   it("handles missing target dry-run and removes stale non-allowlist files on atomic apply", () => {

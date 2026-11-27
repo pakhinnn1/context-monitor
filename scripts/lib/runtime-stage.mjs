@@ -50,10 +50,7 @@ export function assertVersionParity(rootDir) {
   }
 
   const serverSrc = fs.readFileSync(path.join(rootDir, "src", "server.mjs"), "utf8");
-  const serverMatches = collectMatches(
-    serverSrc,
-    /new\s+McpServer\([\s\S]*?version:\s*"([^"]+)"/g,
-  );
+  const serverMatches = collectMatches(serverSrc, /new\s+McpServer\([\s\S]*?version:\s*"([^"]+)"/g);
   if (serverMatches.length !== 1 || serverMatches[0] !== version) {
     throw new Error(
       `src/server.mjs version mismatch: matches=${JSON.stringify(serverMatches)}, expected=${version}`,
@@ -69,7 +66,10 @@ export function assertVersionParity(rootDir) {
   }
 
   const testServerSrc = fs.readFileSync(path.join(rootDir, "scripts", "test-server.mjs"), "utf8");
-  const clientMatches = collectMatches(testServerSrc, /new\s+Client\([\s\S]*?version:\s*"([^"]+)"/g);
+  const clientMatches = collectMatches(
+    testServerSrc,
+    /new\s+Client\([\s\S]*?version:\s*"([^"]+)"/g,
+  );
   if (clientMatches.length !== 3 || clientMatches.some((v) => v !== version)) {
     throw new Error(
       `scripts/test-server.mjs Client version mismatch: matches=${JSON.stringify(clientMatches)} (expected 3x ${version})`,
@@ -152,9 +152,7 @@ export function stageAndValidateRuntime(
       );
     }
 
-    const validation = validateFn
-      ? validateFn(stagedDir)
-      : runAgyStrictValidate(stagedDir, agyBin);
+    const validation = validateFn ? validateFn(stagedDir) : runAgyStrictValidate(stagedDir, agyBin);
 
     return { version, stagedDir, appHtmlBytes, validation, cleanup };
   } catch (err) {
