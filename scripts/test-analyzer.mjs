@@ -1536,16 +1536,20 @@ describe("Suite 11: Trajectory chart markup, ARIA slider, and scrubbing math", (
     assert.equal(idleHtml.match(/role="slider"/g)?.length ?? 0, 1);
     assert.equal(idleHtml.includes("traj-hit"), false);
 
-    // SVG contains no <text> nodes; HTML axis labels and 75% label live outside SVG
+    // SVG contains no <text>, <circle>, or <polygon> nodes and preserves full-box scaling
     const svgMatch = idleHtml.match(/<svg[\s\S]*?<\/svg>/);
     assert.ok(svgMatch, "expected inline <svg>");
+    assert.ok(svgMatch[0].includes('preserveAspectRatio="none"'));
     assert.equal(svgMatch[0].includes("<text"), false);
+    assert.equal(svgMatch[0].includes("<circle"), false);
+    assert.equal(svgMatch[0].includes("<polygon"), false);
     assert.ok(svgMatch[0].includes('aria-hidden="true"'));
     assert.match(idleHtml, /class="traj-y-axis"[\s\S]*1M[\s\S]*500k[\s\S]*>0</);
     assert.match(idleHtml, /class="traj-x-axis"[\s\S]*Turn 1[\s\S]*Turn 42/);
     assert.match(idleHtml, /class="traj-threshold-lbl"[^>]*>75%</);
 
-    // Slider ARIA attributes match last point by default and crosshair starts hidden
+    // Slider ARIA attributes match last point by default; readout/dots/crosshair start idle
+    assert.match(idleHtml, /class="traj-readout"[^>]*data-scrubbing="false"/);
     assert.ok(idleHtml.includes('data-slot="traj-scrubber"'));
     assert.ok(idleHtml.includes('aria-label="Context growth trajectory"'));
     assert.ok(idleHtml.includes('aria-valuemin="1"'));
@@ -1553,15 +1557,20 @@ describe("Suite 11: Trajectory chart markup, ARIA slider, and scrubbing math", (
     assert.ok(idleHtml.includes('aria-valuenow="4"'));
     assert.ok(idleHtml.includes(`aria-valuetext="${formatTrajectoryReadout(trajectory.points[3])}"`));
     assert.match(idleHtml, /class="traj-crosshair"[^>]*data-slot="traj-crosshair"[^>]*data-active="false"/);
+    assert.match(idleHtml, /class="traj-cache-dot"[^>]*data-slot="traj-cache-dot"[^>]*data-active="false"[^>]*style="left:100\.00%;top:70\.00%"/);
+    assert.match(idleHtml, /class="traj-active-dot"[^>]*data-slot="traj-active-dot"[^>]*data-active="false"[^>]*style="left:100\.00%;top:65\.00%"/);
     assert.ok(idleHtml.includes('class="traj-cp-peak"'));
     assert.ok(idleHtml.includes('class="traj-cp-base"'));
     assert.ok(idleHtml.includes('class="traj-caption"'));
 
-    // Explicit activeIdx activates crosshair and updates aria-valuenow / aria-valuetext
+    // Explicit activeIdx activates crosshair, readout, and both overlay dots
     const scrubHtml = renderTrajectoryChart(trajectory, 1_000_000, 1);
+    assert.match(scrubHtml, /class="traj-readout"[^>]*data-scrubbing="true"/);
     assert.ok(scrubHtml.includes('aria-valuenow="2"'));
     assert.ok(scrubHtml.includes(`aria-valuetext="${formatTrajectoryReadout(trajectory.points[1])}"`));
     assert.match(scrubHtml, /class="traj-crosshair"[^>]*data-slot="traj-crosshair"[^>]*data-active="true"/);
+    assert.match(scrubHtml, /class="traj-cache-dot"[^>]*data-slot="traj-cache-dot"[^>]*data-active="true"[^>]*style="left:33\.33%;top:40\.00%"/);
+    assert.match(scrubHtml, /class="traj-active-dot"[^>]*data-slot="traj-active-dot"[^>]*data-active="true"[^>]*style="left:33\.33%;top:22\.00%"/);
   });
 
   it("computes trajectory geometry and maps pointer clientX to nearest point index", () => {
@@ -1582,8 +1591,13 @@ describe("Suite 11: Trajectory chart markup, ARIA slider, and scrubbing math", (
     assert.equal(geom.coords.length, 5);
     assert.equal(geom.coords[0].x, 0);
     assert.equal(geom.coords[4].x, 600);
-    for (let i = 1; i < geom.coords.length; i += 1) {
-      assert.ok(geom.coords[i].x > geom.coords[i - 1].x);
+    assert.equal(geom.coords[0].xPct, 0);
+    assert.equal(geom.coords[4].xPct, 100);
+    for (let i = 0; i < geom.coords.length; i += 1) {
+      assert.ok(geom.coords[i].xPct >= 0 && geom.coords[i].xPct <= 100);
+      assert.ok(geom.coords[i].yActivePct >= 0 && geom.coords[i].yActivePct <= 100);
+      assert.ok(geom.coords[i].yCachePct >= 0 && geom.coords[i].yCachePct <= 100);
+      if (i > 0) assert.ok(geom.coords[i].x > geom.coords[i - 1].x);
     }
 
     const rect = { left: 100, width: 400 };
