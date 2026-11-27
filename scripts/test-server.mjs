@@ -16,7 +16,7 @@ const transport = new StdioClientTransport({
 
 const client = new Client({
   name: "context-monitor-test",
-  version: "0.1.0",
+  version: "0.1.1",
 });
 
 await client.connect(transport);
@@ -94,6 +94,25 @@ try {
       snap.current.exact.activeTokens,
       `Segment sum (${segSum}) must equal exact activeTokens (${snap.current.exact.activeTokens})`,
     );
+    if (
+      snap.current.model.contextWindow !== null &&
+      snap.current.exact.activeTokens <= snap.current.model.contextWindow
+    ) {
+      assert.equal(
+        typeof snap.current.exact.freePercent,
+        "number",
+        "freePercent must be a number when contextWindow is known",
+      );
+      const segPctSum = snap.current.segments.reduce(
+        (a, s) => a + (s.percent || 0),
+        0,
+      );
+      assert.equal(
+        Math.round((segPctSum + snap.current.exact.freePercent) * 10),
+        1000,
+        `Displayed percentages (${segPctSum} + ${snap.current.exact.freePercent}) must sum to 100.0%`,
+      );
+    }
   }
 
   // 4. Test get_context_snapshot on a conversation with checkpoints if one exists
@@ -111,6 +130,21 @@ try {
       cpSnap.current.exact.activeTokens,
       `Checkpoint thread segment sum (${cpSegSum}) must equal activeTokens (${cpSnap.current.exact.activeTokens})`,
     );
+    if (
+      cpSnap.current.model.contextWindow !== null &&
+      cpSnap.current.exact.activeTokens <= cpSnap.current.model.contextWindow
+    ) {
+      assert.equal(typeof cpSnap.current.exact.freePercent, "number");
+      const cpPctSum = cpSnap.current.segments.reduce(
+        (a, s) => a + (s.percent || 0),
+        0,
+      );
+      assert.equal(
+        Math.round((cpPctSum + cpSnap.current.exact.freePercent) * 10),
+        1000,
+        `Checkpoint thread percentages (${cpPctSum} + ${cpSnap.current.exact.freePercent}) must sum to 100.0%`,
+      );
+    }
     console.log(
       `Verified checkpoint thread ${cpConv.conversationId}: active=${cpSnap.current.exact.activeTokens}, checkpoints=${cpSnap.current.exact.checkpointCount}`,
     );

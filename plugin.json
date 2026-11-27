@@ -1,7 +1,7 @@
 {
   "name": "context-monitor",
   "displayName": "Context Monitor",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Inspect local Antigravity conversation context usage, cached prompt tokens, compaction checkpoints, and configured MCP tool inventory in the side panel or sidebar.",
   "logo": "assets/logo.svg",
   "suggestedPrompts": [
