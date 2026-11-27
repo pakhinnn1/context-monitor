@@ -6,10 +6,13 @@
   "description": "Local MCP App plugin for Antigravity Desktop showing per-conversation context usage.",
   "scripts": {
     "build": "node scripts/build.mjs",
-    "test": "node --test scripts/test-analyzer.mjs && node scripts/test-server.mjs",
+    "test": "npm run build && node --test scripts/test-analyzer.mjs scripts/test-tooling.mjs && node scripts/test-server.mjs",
     "check:identity": "node scripts/check-identity.mjs",
     "check:privacy": "node scripts/check-privacy.mjs",
-    "gh": "node scripts/gh.mjs"
+    "gh": "node scripts/gh.mjs",
+    "validate": "node scripts/lib/runtime-stage.mjs",
+    "sync": "node scripts/sync-plugin.mjs",
+    "package": "node scripts/package-release.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/ext-apps": "^2.0.4",
