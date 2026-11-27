@@ -47,6 +47,10 @@ let auxPaneOpenUnsupported = false;
 let isConnected = false;
 let isWideMode = false;
 let railLoaded = false;
+let hasExplicitConversationSelection = false;
+let hasSyncedPreferences = false;
+let hasHydratedDetails = false;
+let hydrateInFlightKey = null;
 
 let isRefreshing = false;
 let lastError = null;
@@ -144,6 +148,12 @@ function isDrawerOpen(drawerId) {
   return false;
 }
 
+function renderDrawerAttrs(drawerId, extraClass = "") {
+  const open = isDrawerOpen(drawerId);
+  const cls = extraClass ? `drawer ${extraClass}` : "drawer";
+  return `class="${cls}" data-drawer-id="${drawerId}" data-rendered-open="${open ? "true" : "false"}"${open ? " open" : ""}`;
+}
+
 function setupHintFallbackAndAria() {
   let needsHintFallback = false;
   if (Object.hasOwn(HTMLElement.prototype, "popover")) {
@@ -187,6 +197,11 @@ function setupHintFallbackAndAria() {
       if (!(target instanceof HTMLElement)) return;
 
       if (target instanceof HTMLDetailsElement && target.dataset.drawerId) {
+        const renderedOpen = target.dataset.renderedOpen === "true";
+        if (target.open === renderedOpen) {
+          return;
+        }
+        target.dataset.renderedOpen = String(target.open);
         userToggledDrawers.set(target.dataset.drawerId, target.open);
         return;
       }
@@ -1089,7 +1104,7 @@ function buildInspectorHtml() {
       : null;
 
   const trajectoryDrawer = current?.hasUsageData
-    ? `<details class="drawer drawer-card" data-drawer-id="trajectory"${isDrawerOpen("trajectory") ? " open" : ""}>
+    ? `<details ${renderDrawerAttrs("trajectory", "drawer-card")}>
          <summary>
            ${renderChevronSvg()}
            <span>Trajectory</span>
@@ -1107,7 +1122,7 @@ function buildInspectorHtml() {
 
   const topTools = current?.topTools || [];
   const topToolsDrawer = current?.hasUsageData
-    ? `<details class="drawer drawer-card" data-drawer-id="top-tools"${isDrawerOpen("top-tools") ? " open" : ""}>
+    ? `<details ${renderDrawerAttrs("top-tools", "drawer-card")}>
          <summary>
            ${renderChevronSvg()}
            <span>Top tools</span>
@@ -1125,7 +1140,7 @@ function buildInspectorHtml() {
 
   const artifacts = current?.artifacts;
   const artifactsDrawer = current
-    ? `<details class="drawer drawer-card" data-drawer-id="artifacts"${isDrawerOpen("artifacts") ? " open" : ""}>
+    ? `<details ${renderDrawerAttrs("artifacts", "drawer-card")}>
          <summary>
            ${renderChevronSvg()}
            <span>Artifacts</span>
@@ -1215,7 +1230,7 @@ function buildInspectorHtml() {
         ${trajectoryDrawer}
         ${detailPairHtml}
 
-        <details class="drawer" data-drawer-id="mcp"${isDrawerOpen("mcp") ? " open" : ""}>
+        <details ${renderDrawerAttrs("mcp")}>
           <summary>
             ${renderChevronSvg()}
             <span>MCP tools</span>
@@ -1226,7 +1241,7 @@ function buildInspectorHtml() {
           </div>
         </details>
 
-        <details class="drawer" data-drawer-id="rules"${isDrawerOpen("rules") ? " open" : ""}>
+        <details ${renderDrawerAttrs("rules")}>
           <summary>
             ${renderChevronSvg()}
             <span>Rules &amp; skills</span>
@@ -1241,7 +1256,7 @@ function buildInspectorHtml() {
 
         ${
           current?.hasUsageData
-            ? `<details class="drawer" data-drawer-id="exact"${isDrawerOpen("exact") ? " open" : ""}>
+            ? `<details ${renderDrawerAttrs("exact")}>
                 <summary>
                   ${renderChevronSvg()}
                   <span>Exact transcript counters</span>
@@ -1463,6 +1478,7 @@ function bindDelegatedEvents() {
       const nextId = target.value;
       if (nextId) {
         selectedConversationId = nextId;
+        hasExplicitConversationSelection = true;
         if (attachedConversationId && attachedConversationId !== nextId) {
           attachedConversationId = null;
         }
@@ -1481,6 +1497,7 @@ function bindDelegatedEvents() {
 
     if (target instanceof HTMLInputElement && target.id === "compact-subagents-toggle") {
       includeSubagents = target.checked;
+      hasSyncedPreferences = true;
       railState.kind = includeSubagents ? "all" : "interactive";
       const railKindEl = document.getElementById("rail-kind");
       if (railKindEl instanceof HTMLSelectElement) {
@@ -1500,6 +1517,7 @@ function bindDelegatedEvents() {
         const nextInclude = nextKind === "all";
         if (includeSubagents !== nextInclude) {
           includeSubagents = nextInclude;
+          hasSyncedPreferences = true;
           const compactToggle = document.getElementById("compact-subagents-toggle");
           if (compactToggle instanceof HTMLInputElement) {
             compactToggle.checked = includeSubagents;
@@ -1580,6 +1598,7 @@ function bindDelegatedEvents() {
     if (railItem instanceof HTMLElement && railItem.dataset.convId) {
       const nextId = railItem.dataset.convId;
       selectedConversationId = nextId;
+      hasExplicitConversationSelection = true;
       if (attachedConversationId && attachedConversationId !== nextId) {
         attachedConversationId = null;
       }
@@ -1762,9 +1781,29 @@ function bindDelegatedEvents() {
   });
 }
 
+function syncPreferencesFromSnapshot(prefs) {
+  if (!prefs) return;
+  hasSyncedPreferences = true;
+  if (selectedWorkspacePath === null && prefs.workspacePath) {
+    selectedWorkspacePath = prefs.workspacePath;
+  }
+  includeSubagents = Boolean(prefs.includeSubagents);
+  if (!railLoaded) {
+    railState.kind = includeSubagents ? "all" : "interactive";
+  } else if (includeSubagents && railState.kind === "interactive") {
+    railState.kind = "all";
+  }
+}
+
 async function refreshSnapshot(conversationId, { silent = false, reason = "manual" } = {}) {
   const caps = getHostCaps();
   if (!caps?.serverTools) return;
+
+  const isHydrate = reason === "hydrate";
+  const myHydrateKey = isHydrate ? (conversationId || "__default__") : null;
+  if (isHydrate) {
+    hydrateInFlightKey = myHydrateKey;
+  }
 
   const mySeq = ++snapshotSeq;
   isRefreshing = true;
@@ -1783,7 +1822,9 @@ async function refreshSnapshot(conversationId, { silent = false, reason = "manua
     const args = {};
     if (conversationId) args.conversationId = conversationId;
     if (selectedWorkspacePath) args.workspacePath = selectedWorkspacePath;
-    args.includeSubagents = includeSubagents;
+    if (hasSyncedPreferences) {
+      args.includeSubagents = includeSubagents;
+    }
 
     const result = await enqueueToolCall(() =>
       app.callServerTool({
@@ -1795,13 +1836,12 @@ async function refreshSnapshot(conversationId, { silent = false, reason = "manua
     if (mySeq !== snapshotSeq) return;
 
     if (result?.structuredContent) {
-      selectedConversationId =
-        result.structuredContent.selectedConversationId || selectedConversationId;
-      if (result.structuredContent.preferences) {
-        includeSubagents = Boolean(result.structuredContent.preferences.includeSubagents);
-      }
+      const snap = result.structuredContent;
+      selectedConversationId = snap.selectedConversationId || selectedConversationId;
+      hasHydratedDetails = true;
+      syncPreferencesFromSnapshot(snap.preferences);
       lastError = null;
-      applySnapshotUpdate(result.structuredContent, { userInitiated: !silent });
+      applySnapshotUpdate(snap, { userInitiated: !silent });
       succeeded = true;
     }
   } catch (err) {
@@ -1812,6 +1852,9 @@ async function refreshSnapshot(conversationId, { silent = false, reason = "manua
     }
   } finally {
     if (mySeq === snapshotSeq) {
+      if (isHydrate && hydrateInFlightKey === myHydrateKey) {
+        hydrateInFlightKey = null;
+      }
       if (!silent) {
         const elapsed = performance.now() - startedAt;
         if (elapsed < 350) {
@@ -1844,6 +1887,7 @@ async function refreshRail({ silent = false, resetOffset = true } = {}) {
   const caps = getHostCaps();
   if (!caps?.serverTools) return;
 
+  const wasRailLoaded = railLoaded;
   const mySeq = ++railSeq;
   const nextOffset = resetOffset ? 0 : railState.items.length;
   if (resetOffset) {
@@ -1891,6 +1935,23 @@ async function refreshRail({ silent = false, resetOffset = true } = {}) {
       railState.loadingMore = false;
       updateRailBodyDom();
       syncRailSelectionHighlight();
+      if (
+        !wasRailLoaded &&
+        railLoaded &&
+        !hasExplicitConversationSelection &&
+        !hydrateInFlightKey &&
+        !isRefreshing &&
+        !railState.query &&
+        railState.filter === "all" &&
+        railState.sort === "recent" &&
+        railState.items.length > 0 &&
+        selectedConversationId !== railState.items[0].conversationId
+      ) {
+        void refreshSnapshot(railState.items[0].conversationId, {
+          silent: true,
+          reason: "hydrate",
+        });
+      }
     }
   }
 }
@@ -1898,29 +1959,46 @@ async function refreshRail({ silent = false, resetOffset = true } = {}) {
 function maybeHydrateMount() {
   if (!isConnected) return;
   const cur = currentSnapshot?.current;
-  if (cur?.hasUsageData && cur.trajectory === undefined) {
-    void refreshSnapshot(selectedConversationId, { silent: true, reason: "hydrate" });
+  if (cur && cur.trajectory === undefined) {
+    const hydrateCid = hasExplicitConversationSelection
+      ? selectedConversationId
+      : null;
+    const nextKey = hydrateCid || "__default__";
+    if (hydrateInFlightKey !== nextKey) {
+      void refreshSnapshot(hydrateCid, { silent: true, reason: "hydrate" });
+    }
   }
   if (isWideMode && !railLoaded) {
     void refreshRail({ silent: true, resetOffset: true });
   }
 }
 
+function measureContainerWidth() {
+  const rectWidth = rootEl.getBoundingClientRect?.().width || 0;
+  if (rectWidth > 0) return rectWidth;
+  return document.documentElement?.clientWidth || window.innerWidth || 0;
+}
+
 function setupResizeObserver() {
   const updateWidth = (width) => {
+    if (!width || width <= 0) return;
     const nextWide = width >= 760;
     if (nextWide !== isWideMode) {
       isWideMode = nextWide;
       if (isWideMode && !railLoaded && isConnected) {
         void refreshRail({ silent: true, resetOffset: true });
       }
-      if (currentSnapshot && !isUserInteracting()) {
-        render();
+      if (currentSnapshot) {
+        if (!isUserInteracting()) {
+          render();
+        } else {
+          pendingStructuralRender = true;
+        }
       }
     }
   };
 
-  isWideMode = (rootEl.getBoundingClientRect?.().width || window.innerWidth) >= 760;
+  isWideMode = measureContainerWidth() >= 760;
 
   if (typeof ResizeObserver === "function") {
     const ro = new ResizeObserver((entries) => {
@@ -1949,9 +2027,12 @@ function startPolling() {
 }
 
 // Register SDK handlers BEFORE connect() so no initial notification is missed
-app.ontoolinput = ({ arguments: args }) => {
+app.ontoolinput = ({ arguments: args } = {}) => {
   if (args && typeof args.conversationId === "string" && args.conversationId) {
     selectedConversationId = args.conversationId;
+    hasExplicitConversationSelection = true;
+  } else {
+    hasExplicitConversationSelection = false;
   }
   if (args && typeof args.workspacePath === "string" && args.workspacePath.trim()) {
     selectedWorkspacePath = args.workspacePath.trim();
@@ -1961,22 +2042,23 @@ app.ontoolinput = ({ arguments: args }) => {
 app.ontoolresult = (result) => {
   if (result?.structuredContent) {
     const snap = result.structuredContent;
+    if (
+      !hasExplicitConversationSelection &&
+      hasHydratedDetails &&
+      currentSnapshot?.generatedAt &&
+      snap.generatedAt &&
+      snap.generatedAt <= currentSnapshot.generatedAt
+    ) {
+      return;
+    }
+
     const prevId = selectedConversationId;
     selectedConversationId = snap.selectedConversationId || selectedConversationId;
     if (prevId && selectedConversationId !== prevId && attachedConversationId) {
       attachedConversationId = null;
     }
 
-    if (snap.preferences) {
-      if (selectedWorkspacePath === null && snap.preferences.workspacePath) {
-        selectedWorkspacePath = snap.preferences.workspacePath;
-      }
-      includeSubagents = Boolean(snap.preferences.includeSubagents);
-      if (includeSubagents && railState.kind === "interactive") {
-        railState.kind = "all";
-      }
-    }
-
+    syncPreferencesFromSnapshot(snap.preferences);
     lastError = null;
     applySnapshotUpdate(snap, { userInitiated: true });
     maybeHydrateMount();
@@ -2000,10 +2082,17 @@ async function init() {
   await app.connect();
   isConnected = true;
   applyThemeFromHost(app.getHostContext());
+  const measured = measureContainerWidth();
+  if (measured > 0) {
+    isWideMode = measured >= 760;
+  }
   startPolling();
 
   if (!currentSnapshot) {
-    void refreshSnapshot(selectedConversationId, { silent: true });
+    void refreshSnapshot(
+      hasExplicitConversationSelection ? selectedConversationId : null,
+      { silent: true, reason: "hydrate" },
+    );
     if (isWideMode && !railLoaded) {
       void refreshRail({ silent: true, resetOffset: true });
     }
