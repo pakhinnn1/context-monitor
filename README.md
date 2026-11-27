@@ -31,12 +31,33 @@ Local MCP App plugin for Antigravity Desktop (`v0.2.0`) that displays per-conver
 ## Build and test
 
 ```bash
-npm install
+npm ci
 npm run build
 npm test
-agy plugin validate . --strict
+npm run validate
 ```
 
 ## Install into Antigravity
 
-Copy only the runtime plugin bundle (`dist/`, `plugin.json`, `mcp_config.json`, `assets/`, and `README.md` — excluding `docs/`, `src/`, `scripts/`, and `node_modules/`) into `~/.gemini/config/plugins/context-monitor/` and reload MCP servers from Antigravity settings.
+### From a GitHub Release archive
+
+Download `context-monitor-v0.2.0.zip` (and optional `.sha256`), remove any previous installation directory so stale files do not linger, and extract into Antigravity's plugins folder:
+
+```bash
+rm -rf ~/.gemini/config/plugins/context-monitor
+unzip -q context-monitor-v0.2.0.zip -d ~/.gemini/config/plugins/
+```
+
+Then reload `context-monitor_context-monitor` from Antigravity Desktop settings.
+
+### Maintainer local sync & release packaging
+
+Preview or apply an atomic allowlist-only sync (`plugin.json`, `mcp_config.json`, `README.md`, `assets/`, `dist/`) into `~/.gemini/config/plugins/context-monitor`, or package a validated release zip into `release/`:
+
+```bash
+npm run sync -- --dry-run
+npm run sync
+npm run package
+```
+
+After running `npm run sync`, reload `context-monitor_context-monitor` manually from Antigravity Desktop settings.
