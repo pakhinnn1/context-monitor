@@ -22,6 +22,12 @@ import {
   resolveDataDir,
   savePreferences,
 } from "../src/preferences.mjs";
+import {
+  computeTrajectoryGeometry,
+  findNearestTrajectoryIndex,
+  formatTrajectoryReadout,
+  renderTrajectoryChart,
+} from "../src/ui/charts.js";
 
 function makeTempDir(prefix = "ctx-mon-unit-") {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -1488,5 +1494,107 @@ describe("Suite 10: listConversations fleet KPIs, search, filtering, sorting, an
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe("Suite 11: Trajectory chart markup, ARIA slider, and scrubbing math", () => {
+  it("renders empty and single-point fallback states without SVG or slider", () => {
+    const emptyHtml = renderTrajectoryChart({ points: [] }, 1_000_000);
+    assert.match(emptyHtml, /class="traj-empty"/);
+    assert.equal(emptyHtml.includes("role=\"slider\""), false);
+    assert.equal(emptyHtml.includes("<svg"), false);
+
+    const singlePt = {
+      turn: 1,
+      activeTokens: 25_000,
+      cacheReadTokens: 10_000,
+      outputTokens: 500,
+      kind: "turn",
+    };
+    const singleHtml = renderTrajectoryChart({ points: [singlePt] }, 1_000_000);
+    assert.match(singleHtml, /class="traj-single"/);
+    assert.ok(singleHtml.includes(formatTrajectoryReadout(singlePt)));
+    assert.equal(singleHtml.includes("role=\"slider\""), false);
+    assert.equal(singleHtml.includes("<svg"), false);
+  });
+
+  it("renders single-stop ARIA slider, HTML axis labels outside SVG, and crosshair states", () => {
+    const trajectory = {
+      points: [
+        { turn: 1, activeTokens: 20_000, cacheReadTokens: 0, outputTokens: 100, kind: "turn" },
+        { turn: 8, activeTokens: 780_000, cacheReadTokens: 600_000, outputTokens: 400, kind: "checkpoint_peak" },
+        { turn: 9, activeTokens: 120_000, cacheReadTokens: 80_000, outputTokens: 250, kind: "checkpoint_baseline" },
+        { turn: 42, activeTokens: 350_000, cacheReadTokens: 300_000, outputTokens: 320, kind: "turn" },
+      ],
+      totalTurnCount: 150,
+      checkpointCount: 1,
+      isBounded: true,
+    };
+
+    const idleHtml = renderTrajectoryChart(trajectory, 1_000_000);
+    assert.equal(idleHtml.match(/tabindex="0"/g)?.length ?? 0, 1);
+    assert.equal(idleHtml.match(/role="slider"/g)?.length ?? 0, 1);
+    assert.equal(idleHtml.includes("traj-hit"), false);
+
+    // SVG contains no <text> nodes; HTML axis labels and 75% label live outside SVG
+    const svgMatch = idleHtml.match(/<svg[\s\S]*?<\/svg>/);
+    assert.ok(svgMatch, "expected inline <svg>");
+    assert.equal(svgMatch[0].includes("<text"), false);
+    assert.ok(svgMatch[0].includes('aria-hidden="true"'));
+    assert.match(idleHtml, /class="traj-y-axis"[\s\S]*1M[\s\S]*500k[\s\S]*>0</);
+    assert.match(idleHtml, /class="traj-x-axis"[\s\S]*Turn 1[\s\S]*Turn 42/);
+    assert.match(idleHtml, /class="traj-threshold-lbl"[^>]*>75%</);
+
+    // Slider ARIA attributes match last point by default and crosshair starts hidden
+    assert.ok(idleHtml.includes('data-slot="traj-scrubber"'));
+    assert.ok(idleHtml.includes('aria-label="Context growth trajectory"'));
+    assert.ok(idleHtml.includes('aria-valuemin="1"'));
+    assert.ok(idleHtml.includes('aria-valuemax="4"'));
+    assert.ok(idleHtml.includes('aria-valuenow="4"'));
+    assert.ok(idleHtml.includes(`aria-valuetext="${formatTrajectoryReadout(trajectory.points[3])}"`));
+    assert.match(idleHtml, /class="traj-crosshair"[^>]*data-slot="traj-crosshair"[^>]*data-active="false"/);
+    assert.ok(idleHtml.includes('class="traj-cp-peak"'));
+    assert.ok(idleHtml.includes('class="traj-cp-base"'));
+    assert.ok(idleHtml.includes('class="traj-caption"'));
+
+    // Explicit activeIdx activates crosshair and updates aria-valuenow / aria-valuetext
+    const scrubHtml = renderTrajectoryChart(trajectory, 1_000_000, 1);
+    assert.ok(scrubHtml.includes('aria-valuenow="2"'));
+    assert.ok(scrubHtml.includes(`aria-valuetext="${formatTrajectoryReadout(trajectory.points[1])}"`));
+    assert.match(scrubHtml, /class="traj-crosshair"[^>]*data-slot="traj-crosshair"[^>]*data-active="true"/);
+  });
+
+  it("computes trajectory geometry and maps pointer clientX to nearest point index", () => {
+    assert.equal(computeTrajectoryGeometry({ points: [{ turn: 1, activeTokens: 100, cacheReadTokens: 0 }] }, 1000), null);
+
+    const geom = computeTrajectoryGeometry(
+      {
+        points: [
+          { turn: 1, activeTokens: 100, cacheReadTokens: 0 },
+          { turn: 2, activeTokens: 200, cacheReadTokens: 50 },
+          { turn: 3, activeTokens: 300, cacheReadTokens: 100 },
+          { turn: 4, activeTokens: 400, cacheReadTokens: 150 },
+          { turn: 5, activeTokens: 500, cacheReadTokens: 200 },
+        ],
+      },
+      1000,
+    );
+    assert.equal(geom.coords.length, 5);
+    assert.equal(geom.coords[0].x, 0);
+    assert.equal(geom.coords[4].x, 600);
+    for (let i = 1; i < geom.coords.length; i += 1) {
+      assert.ok(geom.coords[i].x > geom.coords[i - 1].x);
+    }
+
+    const rect = { left: 100, width: 400 };
+    assert.equal(findNearestTrajectoryIndex(geom.coords, 100, rect), 0);
+    assert.equal(findNearestTrajectoryIndex(geom.coords, 40, rect), 0);
+    assert.equal(findNearestTrajectoryIndex(geom.coords, 300, rect), 2);
+    assert.equal(findNearestTrajectoryIndex(geom.coords, 385, rect), 3);
+    assert.equal(findNearestTrajectoryIndex(geom.coords, 500, rect), 4);
+    assert.equal(findNearestTrajectoryIndex(geom.coords, 620, rect), 4);
+    assert.equal(findNearestTrajectoryIndex([], 200, rect), -1);
+    assert.equal(findNearestTrajectoryIndex([geom.coords[0]], 200, rect), 0);
+    assert.equal(findNearestTrajectoryIndex(geom.coords, 200, { left: 0, width: 0 }), 4);
   });
 });

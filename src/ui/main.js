@@ -6,6 +6,7 @@ import {
 import { z } from "zod";
 import {
   computeTrajectoryGeometry,
+  findNearestTrajectoryIndex,
   formatTrajectoryReadout,
   renderTrajectoryChart,
 } from "./charts.js";
@@ -69,6 +70,9 @@ let inFlightCalls = 0;
 const callQueue = [];
 
 let activeTrajectoryCoords = null;
+let activeTrajectoryIndex = null;
+let isTrajectoryPointerScrubbing = false;
+let isTrajectoryKeyScrubbing = false;
 let openTipCount = 0;
 let lastTipClosedAt = 0;
 const managedTriggers = new WeakSet();
@@ -410,15 +414,19 @@ function computeStructureKey(snapshot, error) {
   });
 }
 
-function isUserInteracting() {
-  const active = document.activeElement;
+function isUserInteracting(nextActiveEl = document.activeElement) {
+  if (isTrajectoryPointerScrubbing || isTrajectoryKeyScrubbing) {
+    return true;
+  }
+  const active = nextActiveEl;
   if (
     active &&
     (active.id === "thread-select" ||
       active.id === "workspace-select" ||
       active.id === "rail-search" ||
       active.id === "rail-sort" ||
-      active.id === "rail-kind")
+      active.id === "rail-kind" ||
+      active.id === "traj-scrubber")
   ) {
     return true;
   }
@@ -507,16 +515,30 @@ function setHighlight(segId) {
   }
 }
 
-function updateTrajectoryScrub(idx) {
+function updateTrajectoryScrub(idx, { scrubbing = false } = {}) {
   if (!activeTrajectoryCoords || activeTrajectoryCoords.length === 0) return;
   const clamped = Math.max(0, Math.min(activeTrajectoryCoords.length - 1, idx));
+  activeTrajectoryIndex = clamped;
   const target = activeTrajectoryCoords[clamped];
+  const readoutText = formatTrajectoryReadout(target.pt);
   const readoutEl = rootEl.querySelector('[data-slot="traj-readout"]');
   const dotEl = rootEl.querySelector('[data-slot="traj-active-dot"]');
-  if (readoutEl) readoutEl.textContent = formatTrajectoryReadout(target.pt);
+  const crosshairEl = rootEl.querySelector('[data-slot="traj-crosshair"]');
+  const scrubberEl = rootEl.querySelector('[data-slot="traj-scrubber"]');
+  if (readoutEl) readoutEl.textContent = readoutText;
   if (dotEl) {
     dotEl.setAttribute("cx", target.x.toFixed(1));
     dotEl.setAttribute("cy", target.yActive.toFixed(1));
+  }
+  if (crosshairEl) {
+    const xStr = target.x.toFixed(1);
+    crosshairEl.setAttribute("x1", xStr);
+    crosshairEl.setAttribute("x2", xStr);
+    crosshairEl.setAttribute("data-active", scrubbing ? "true" : "false");
+  }
+  if (scrubberEl) {
+    scrubberEl.setAttribute("aria-valuenow", String(clamped + 1));
+    scrubberEl.setAttribute("aria-valuetext", readoutText);
   }
 }
 
@@ -1341,6 +1363,9 @@ function render() {
   mountedStructureKey = computeStructureKey(currentSnapshot, lastError);
   lastRenderedFingerprint = computeSnapshotFingerprint(currentSnapshot);
   highlightedSegId = null;
+  activeTrajectoryIndex = null;
+  isTrajectoryPointerScrubbing = false;
+  isTrajectoryKeyScrubbing = false;
 
   if (restoreFocusId) {
     document.getElementById(restoreFocusId)?.focus({ preventScroll: true });
@@ -1607,33 +1632,41 @@ function bindDelegatedEvents() {
     }
   });
 
-  rootEl.addEventListener("focusout", (event) => {
+  // Segment cross-highlight & full-plot trajectory scrubbing
+  const scrubFromPointerEvent = (event, scrubber) => {
+    if (!activeTrajectoryCoords || activeTrajectoryCoords.length === 0) return;
+    const idx = findNearestTrajectoryIndex(
+      activeTrajectoryCoords,
+      event.clientX,
+      scrubber.getBoundingClientRect(),
+    );
+    if (idx >= 0) {
+      isTrajectoryPointerScrubbing = true;
+      updateTrajectoryScrub(idx, { scrubbing: true });
+    }
+  };
+
+  rootEl.addEventListener("pointerdown", (event) => {
     const target = event.target;
-    if (
-      target instanceof HTMLElement &&
-      (target.id === "thread-select" ||
-        target.id === "workspace-select" ||
-        target.id === "rail-search" ||
-        target.id === "rail-sort" ||
-        target.id === "rail-kind") &&
-      pendingStructuralRender &&
-      !isUserInteracting()
-    ) {
-      pendingStructuralRender = false;
-      render();
+    if (!(target instanceof Element)) return;
+    const scrubber = target.closest('[data-slot="traj-scrubber"]');
+    if (scrubber instanceof Element) {
+      scrubFromPointerEvent(event, scrubber);
     }
   });
 
-  // Segment cross-highlight & SVG trajectory scrubbing
+  rootEl.addEventListener("pointermove", (event) => {
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+    const scrubber = target.closest('[data-slot="traj-scrubber"]');
+    if (scrubber instanceof Element) {
+      scrubFromPointerEvent(event, scrubber);
+    }
+  });
+
   rootEl.addEventListener("pointerover", (event) => {
     const target = event.target;
     if (!(target instanceof Element)) return;
-
-    const hit = target.closest("[data-traj-idx]");
-    if (hit instanceof Element && hit.getAttribute("data-traj-idx") !== null) {
-      updateTrajectoryScrub(Number(hit.getAttribute("data-traj-idx")));
-      return;
-    }
 
     if (hoverFineQuery && !hoverFineQuery.matches) return;
     const item = target.closest("[data-seg-id]");
@@ -1646,12 +1679,17 @@ function bindDelegatedEvents() {
     const target = event.target;
     if (!(target instanceof Element)) return;
 
-    const hit = target.closest("[data-traj-idx]");
-    if (hit) {
+    const scrubber = target.closest('[data-slot="traj-scrubber"]');
+    if (scrubber) {
       const related = event.relatedTarget;
-      if (!(related instanceof Element) || !related.closest("[data-traj-idx]")) {
-        if (activeTrajectoryCoords) {
-          updateTrajectoryScrub(activeTrajectoryCoords.length - 1);
+      if (!(related instanceof Element) || !related.closest('[data-slot="traj-scrubber"]')) {
+        isTrajectoryPointerScrubbing = false;
+        if (!isTrajectoryKeyScrubbing && activeTrajectoryCoords) {
+          updateTrajectoryScrub(activeTrajectoryCoords.length - 1, { scrubbing: false });
+        }
+        if (pendingStructuralRender && !isUserInteracting()) {
+          pendingStructuralRender = false;
+          render();
         }
       }
       return;
@@ -1670,12 +1708,28 @@ function bindDelegatedEvents() {
     setHighlight(null);
   });
 
+  rootEl.addEventListener("pointercancel", () => {
+    if (!isTrajectoryPointerScrubbing) return;
+    isTrajectoryPointerScrubbing = false;
+    if (!isTrajectoryKeyScrubbing && activeTrajectoryCoords) {
+      updateTrajectoryScrub(activeTrajectoryCoords.length - 1, { scrubbing: false });
+    }
+    if (pendingStructuralRender && !isUserInteracting()) {
+      pendingStructuralRender = false;
+      render();
+    }
+  });
+
   rootEl.addEventListener("focusin", (event) => {
     const target = event.target;
     if (!(target instanceof Element)) return;
-    const hit = target.closest("[data-traj-idx]");
-    if (hit && hit.getAttribute("data-traj-idx") !== null) {
-      updateTrajectoryScrub(Number(hit.getAttribute("data-traj-idx")));
+    const scrubber = target.closest('[data-slot="traj-scrubber"]');
+    if (scrubber && activeTrajectoryCoords && activeTrajectoryCoords.length > 0) {
+      const idx =
+        activeTrajectoryIndex !== null
+          ? activeTrajectoryIndex
+          : activeTrajectoryCoords.length - 1;
+      updateTrajectoryScrub(idx, { scrubbing: true });
       return;
     }
     const item = target.closest("[data-seg-id]");
@@ -1687,16 +1741,34 @@ function bindDelegatedEvents() {
   rootEl.addEventListener("focusout", (event) => {
     const target = event.target;
     if (!(target instanceof Element)) return;
-    const hit = target.closest("[data-traj-idx]");
-    if (hit) {
-      const related = event.relatedTarget;
-      if (!(related instanceof Element) || !related.closest("[data-traj-idx]")) {
-        if (activeTrajectoryCoords) {
-          updateTrajectoryScrub(activeTrajectoryCoords.length - 1);
-        }
+
+    if (target.closest('[data-slot="traj-scrubber"]')) {
+      isTrajectoryKeyScrubbing = false;
+      if (!isTrajectoryPointerScrubbing && activeTrajectoryCoords) {
+        updateTrajectoryScrub(activeTrajectoryCoords.length - 1, { scrubbing: false });
+      }
+      if (pendingStructuralRender && !isUserInteracting(event.relatedTarget)) {
+        pendingStructuralRender = false;
+        render();
       }
       return;
     }
+
+    if (
+      target instanceof HTMLElement &&
+      (target.id === "thread-select" ||
+        target.id === "workspace-select" ||
+        target.id === "rail-search" ||
+        target.id === "rail-sort" ||
+        target.id === "rail-kind") &&
+      pendingStructuralRender &&
+      !isUserInteracting(event.relatedTarget)
+    ) {
+      pendingStructuralRender = false;
+      render();
+      return;
+    }
+
     const item = target.closest("[data-seg-id]");
     if (!item) return;
     const related = event.relatedTarget;
@@ -1717,6 +1789,36 @@ function bindDelegatedEvents() {
       active instanceof HTMLInputElement ||
       active instanceof HTMLTextAreaElement ||
       active instanceof HTMLSelectElement;
+
+    if (
+      active instanceof HTMLElement &&
+      active.dataset.slot === "traj-scrubber" &&
+      activeTrajectoryCoords &&
+      activeTrajectoryCoords.length > 0
+    ) {
+      const len = activeTrajectoryCoords.length;
+      const cur = activeTrajectoryIndex !== null ? activeTrajectoryIndex : len - 1;
+      let nextIdx = null;
+      if (event.key === "ArrowLeft") {
+        nextIdx = Math.max(0, cur - 1);
+      } else if (event.key === "ArrowRight") {
+        nextIdx = Math.min(len - 1, cur + 1);
+      } else if (event.key === "Home") {
+        nextIdx = 0;
+      } else if (event.key === "End") {
+        nextIdx = len - 1;
+      }
+      if (nextIdx !== null) {
+        event.preventDefault();
+        isTrajectoryKeyScrubbing = true;
+        updateTrajectoryScrub(nextIdx, { scrubbing: true });
+        return;
+      }
+      if (event.key === "Escape") {
+        isTrajectoryKeyScrubbing = false;
+        updateTrajectoryScrub(len - 1, { scrubbing: false });
+      }
+    }
 
     if (event.key === "Escape") {
       if (active instanceof HTMLInputElement && active.id === "rail-search" && active.value) {

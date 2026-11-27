@@ -1,10 +1,9 @@
 import { escapeHtml, formatPercent, formatTokens } from "./format.js";
 
 const SVG_W = 600;
-const SVG_H = 180;
-const PAD = { top: 16, right: 16, bottom: 26, left: 48 };
-const PLOT_W = SVG_W - PAD.left - PAD.right;
-const PLOT_H = SVG_H - PAD.top - PAD.bottom;
+const SVG_H = 150;
+const PLOT_W = SVG_W;
+const PLOT_H = SVG_H;
 
 export function formatTrajectoryReadout(pt) {
   if (!pt) return "—";
@@ -19,22 +18,6 @@ export function formatTrajectoryReadout(pt) {
   return `Turn ${pt.turn} · ${formatTokens(pt.activeTokens)} active (${formatTokens(pt.cacheReadTokens)} cached, ${formatPercent(cachePct)}) · ${formatTokens(pt.outputTokens)} out${kindTag}`;
 }
 
-function pickInteractiveIndices(points, maxNodes = 40) {
-  const n = points.length;
-  if (n <= maxNodes) return points.map((_, idx) => idx);
-
-  const chosen = new Set([0, n - 1]);
-  for (let i = 0; i < n; i += 1) {
-    if (points[i].kind !== "turn") chosen.add(i);
-  }
-  const remainingSlots = Math.max(2, maxNodes - chosen.size);
-  const step = (n - 1) / remainingSlots;
-  for (let s = 1; s < remainingSlots; s += 1) {
-    chosen.add(Math.min(n - 1, Math.round(s * step)));
-  }
-  return Array.from(chosen).sort((a, b) => a - b);
-}
-
 export function computeTrajectoryGeometry(trajectory, contextWindow) {
   const points = trajectory?.points || [];
   if (points.length < 2) return null;
@@ -47,15 +30,38 @@ export function computeTrajectoryGeometry(trajectory, contextWindow) {
   const n = points.length;
 
   const coords = points.map((pt, i) => {
-    const x = PAD.left + (i / (n - 1)) * PLOT_W;
+    const x = (i / (n - 1)) * PLOT_W;
     const clampedActive = Math.max(0, Math.min(pt.activeTokens, maxY));
     const clampedCache = Math.max(0, Math.min(pt.cacheReadTokens, maxY));
-    const yActive = PAD.top + PLOT_H - (clampedActive / maxY) * PLOT_H;
-    const yCache = PAD.top + PLOT_H - (clampedCache / maxY) * PLOT_H;
+    const yActive = PLOT_H - (clampedActive / maxY) * PLOT_H;
+    const yCache = PLOT_H - (clampedCache / maxY) * PLOT_H;
     return { x, yActive, yCache, pt, idx: i };
   });
 
   return { coords, maxY };
+}
+
+export function findNearestTrajectoryIndex(coords, clientX, rect) {
+  if (!Array.isArray(coords) || coords.length === 0) return -1;
+  if (coords.length === 1) return 0;
+  if (!rect || !(rect.width > 0)) return coords.length - 1;
+
+  const frac = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+  const minX = coords[0].x;
+  const maxX = coords[coords.length - 1].x;
+  const span = maxX - minX;
+  const targetX = span > 0 ? minX + frac * span : minX;
+
+  let bestIdx = 0;
+  let bestDist = Math.abs(coords[0].x - targetX);
+  for (let i = 1; i < coords.length; i += 1) {
+    const dist = Math.abs(coords[i].x - targetX);
+    if (dist < bestDist) {
+      bestDist = dist;
+      bestIdx = i;
+    }
+  }
+  return bestIdx;
 }
 
 export function renderTrajectoryChart(trajectory, contextWindow, activeIdx = null) {
@@ -74,11 +80,11 @@ export function renderTrajectoryChart(trajectory, contextWindow, activeIdx = nul
 
   const geom = computeTrajectoryGeometry(trajectory, contextWindow);
   const { coords, maxY } = geom;
-  const focusIdx =
-    activeIdx !== null && activeIdx >= 0 && activeIdx < coords.length
-      ? activeIdx
-      : coords.length - 1;
+  const isScrubbing =
+    activeIdx !== null && activeIdx >= 0 && activeIdx < coords.length;
+  const focusIdx = isScrubbing ? activeIdx : coords.length - 1;
   const focusCoord = coords[focusIdx];
+  const readoutText = formatTrajectoryReadout(focusCoord.pt);
 
   const activePoly = coords
     .map((c) => `${c.x.toFixed(1)},${c.yActive.toFixed(1)}`)
@@ -86,7 +92,7 @@ export function renderTrajectoryChart(trajectory, contextWindow, activeIdx = nul
 
   const firstX = coords[0].x.toFixed(1);
   const lastX = coords[coords.length - 1].x.toFixed(1);
-  const baseLineY = (PAD.top + PLOT_H).toFixed(1);
+  const baseLineY = PLOT_H.toFixed(1);
   const cacheAreaPath = [
     `M ${firstX} ${baseLineY}`,
     ...coords.map((c) => `L ${c.x.toFixed(1)} ${c.yCache.toFixed(1)}`),
@@ -101,23 +107,24 @@ export function renderTrajectoryChart(trajectory, contextWindow, activeIdx = nul
     { frac: 0, val: 0 },
   ];
   const gridLinesHtml = gridLevels
-    .map(({ frac, val }) => {
-      const y = (PAD.top + PLOT_H * (1 - frac)).toFixed(1);
-      return `
-        <line class="traj-grid" x1="${PAD.left}" y1="${y}" x2="${SVG_W - PAD.right}" y2="${y}" />
-        <text class="traj-axis" x="${PAD.left - 6}" y="${Number(y) + 3}" text-anchor="end">${escapeHtml(formatTokens(val))}</text>
-      `;
+    .map(({ frac }) => {
+      const y = (PLOT_H * (1 - frac)).toFixed(1);
+      return `<line class="traj-grid" x1="0" y1="${y}" x2="${PLOT_W}" y2="${y}" />`;
     })
+    .join("");
+  const yLabelsHtml = gridLevels
+    .map(({ val }) => `<span class="traj-y-label">${escapeHtml(formatTokens(val))}</span>`)
     .join("");
 
   // Optional 75% compaction-watch threshold when contextWindow is known
   let thresholdHtml = "";
+  let thresholdLabelHtml = "";
   if (contextWindow && contextWindow > 0 && contextWindow * 0.75 <= maxY) {
-    const y75 = (PAD.top + PLOT_H - ((contextWindow * 0.75) / maxY) * PLOT_H).toFixed(1);
-    thresholdHtml = `
-      <line class="traj-threshold" x1="${PAD.left}" y1="${y75}" x2="${SVG_W - PAD.right}" y2="${y75}" />
-      <text class="traj-threshold-lbl" x="${SVG_W - PAD.right - 2}" y="${Number(y75) - 4}" text-anchor="end">75%</text>
-    `;
+    const thresholdFrac = (contextWindow * 0.75) / maxY;
+    const y75 = (PLOT_H - thresholdFrac * PLOT_H).toFixed(1);
+    const topPct = ((1 - thresholdFrac) * 100).toFixed(2);
+    thresholdHtml = `<line class="traj-threshold" x1="0" y1="${y75}" x2="${PLOT_W}" y2="${y75}" />`;
+    thresholdLabelHtml = `<span class="traj-threshold-lbl" aria-hidden="true" style="top:${topPct}%">75%</span>`;
   }
 
   // Compaction vertical lines and markers
@@ -130,9 +137,9 @@ export function renderTrajectoryChart(trajectory, contextWindow, activeIdx = nul
       const lineX =
         next && next.pt.kind === "checkpoint_baseline"
           ? ((c.x + next.x) / 2).toFixed(1)
-          : Math.min(SVG_W - PAD.right, c.x + 4).toFixed(1);
+          : Math.min(PLOT_W, c.x + 4).toFixed(1);
       cpLines.push(
-        `<line class="traj-cp-line" x1="${lineX}" y1="${PAD.top}" x2="${lineX}" y2="${baseLineY}" />`,
+        `<line class="traj-cp-line" x1="${lineX}" y1="0" x2="${lineX}" y2="${baseLineY}" />`,
       );
       const r = 4;
       const cx = c.x.toFixed(1);
@@ -147,19 +154,6 @@ export function renderTrajectoryChart(trajectory, contextWindow, activeIdx = nul
     }
   }
 
-  const interactiveIndices = pickInteractiveIndices(points, 40);
-  const hitTargets = interactiveIndices
-    .map((idx) => {
-      const c = coords[idx];
-      return `<circle class="traj-hit" cx="${c.x.toFixed(1)}" cy="${c.yActive.toFixed(1)}" r="10" tabindex="0" role="button" data-traj-idx="${idx}" aria-label="${escapeHtml(formatTrajectoryReadout(c.pt))}" />`;
-    })
-    .join("");
-
-  const xLabelsHtml = `
-    <text class="traj-axis" x="${PAD.left}" y="${SVG_H - 6}" text-anchor="start">Turn ${points[0].turn}</text>
-    <text class="traj-axis" x="${SVG_W - PAD.right}" y="${SVG_H - 6}" text-anchor="end">Turn ${points[points.length - 1].turn}</text>
-  `;
-
   const legendCp =
     trajectory.checkpointCount > 0
       ? `<span class="traj-legend-item"><span class="traj-legend-dot traj-legend-cp"></span>Compaction</span>`
@@ -171,20 +165,40 @@ export function renderTrajectoryChart(trajectory, contextWindow, activeIdx = nul
 
   return `
     <div class="traj-wrap">
-      <div class="traj-readout" data-slot="traj-readout">${escapeHtml(formatTrajectoryReadout(focusCoord.pt))}</div>
-      <svg class="traj-svg" viewBox="0 0 ${SVG_W} ${SVG_H}" role="img" aria-labelledby="traj-title traj-desc">
-        <title id="traj-title">Context growth trajectory</title>
-        <desc id="traj-desc">Active prompt tokens and cached input tokens across ${points.length} sampled turns.</desc>
-        ${gridLinesHtml}
-        ${thresholdHtml}
-        <path class="traj-cache-area" d="${cacheAreaPath}" />
-        ${cpLines.join("")}
-        <polyline class="traj-active-line" points="${activePoly}" />
-        ${milestoneMarkers.join("")}
-        <circle class="traj-active-dot" data-slot="traj-active-dot" cx="${focusCoord.x.toFixed(1)}" cy="${focusCoord.yActive.toFixed(1)}" r="4" />
-        ${xLabelsHtml}
-        ${hitTargets}
-      </svg>
+      <div class="traj-readout" data-slot="traj-readout">${escapeHtml(readoutText)}</div>
+      <div class="traj-chart">
+        <div class="traj-y-axis" aria-hidden="true">${yLabelsHtml}</div>
+        <div
+          class="traj-plot"
+          id="traj-scrubber"
+          data-slot="traj-scrubber"
+          tabindex="0"
+          role="slider"
+          aria-label="Context growth trajectory"
+          aria-describedby="traj-desc"
+          aria-valuemin="1"
+          aria-valuemax="${points.length}"
+          aria-valuenow="${focusIdx + 1}"
+          aria-valuetext="${escapeHtml(readoutText)}"
+        >
+          <svg class="traj-svg" viewBox="0 0 ${SVG_W} ${SVG_H}" aria-hidden="true" focusable="false">
+            ${gridLinesHtml}
+            ${thresholdHtml}
+            <path class="traj-cache-area" d="${cacheAreaPath}" />
+            ${cpLines.join("")}
+            <polyline class="traj-active-line" points="${activePoly}" />
+            ${milestoneMarkers.join("")}
+            <line class="traj-crosshair" data-slot="traj-crosshair" data-active="${isScrubbing ? "true" : "false"}" x1="${focusCoord.x.toFixed(1)}" y1="0" x2="${focusCoord.x.toFixed(1)}" y2="${PLOT_H}" />
+            <circle class="traj-active-dot" data-slot="traj-active-dot" cx="${focusCoord.x.toFixed(1)}" cy="${focusCoord.yActive.toFixed(1)}" r="4" />
+          </svg>
+          ${thresholdLabelHtml}
+        </div>
+        <div class="traj-x-axis" aria-hidden="true">
+          <span class="traj-x-label">Turn ${escapeHtml(String(points[0].turn))}</span>
+          <span class="traj-x-label">Turn ${escapeHtml(String(points[points.length - 1].turn))}</span>
+        </div>
+        <span class="sr-only" id="traj-desc">Active prompt tokens and cached input tokens across ${points.length} sampled turns. Use Left and Right arrow keys to inspect turns.</span>
+      </div>
       <div class="traj-legend">
         <span class="traj-legend-item"><span class="traj-legend-dot traj-legend-active"></span>Active prompt</span>
         <span class="traj-legend-item"><span class="traj-legend-dot traj-legend-cache"></span>Cache read</span>
