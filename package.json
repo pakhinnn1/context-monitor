@@ -2,8 +2,8 @@
   "name": "antigravity-context-monitor",
   "version": "0.2.0",
   "private": true,
-  "type": "module",
   "description": "Local MCP App plugin for Antigravity Desktop showing per-conversation context usage.",
+  "type": "module",
   "scripts": {
     "build": "node scripts/build.mjs",
     "test": "npm run build && node --test scripts/test-analyzer.mjs scripts/test-tooling.mjs && node scripts/test-server.mjs",
@@ -12,7 +12,8 @@
     "gh": "node scripts/gh.mjs",
     "validate": "node scripts/lib/runtime-stage.mjs",
     "sync": "node scripts/sync-plugin.mjs",
-    "package": "node scripts/package-release.mjs"
+    "package": "node scripts/package-release.mjs",
+    "prepare": "vp config"
   },
   "dependencies": {
     "@modelcontextprotocol/ext-apps": "^2.0.4",
@@ -21,6 +22,10 @@
     "zod": "^4.2.0"
   },
   "devDependencies": {
-    "esbuild": "^0.28.2"
+    "esbuild": "^0.28.2",
+    "vite-plus": "1.8.0"
+  },
+  "overrides": {
+    "vite": "npm:@voidzero-dev/vite-plus-core@8.3.8001"
   }
 }

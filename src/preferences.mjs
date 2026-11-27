@@ -67,9 +67,7 @@ export function loadPreferences(dataDir) {
     }
 
     const workspacePath =
-      typeof parsed.workspacePath === "string"
-        ? validateWorkspaceDir(parsed.workspacePath)
-        : null;
+      typeof parsed.workspacePath === "string" ? validateWorkspaceDir(parsed.workspacePath) : null;
     const includeSubagents =
       typeof parsed.includeSubagents === "boolean" ? parsed.includeSubagents : false;
 

@@ -17,11 +17,7 @@ import {
   scanLocalInventory,
   validateWorkspaceDir,
 } from "../src/analyzer.mjs";
-import {
-  loadPreferences,
-  resolveDataDir,
-  savePreferences,
-} from "../src/preferences.mjs";
+import { loadPreferences, resolveDataDir, savePreferences } from "../src/preferences.mjs";
 import {
   computeTrajectoryGeometry,
   findNearestTrajectoryIndex,
@@ -57,11 +53,7 @@ function writeTranscript(paths, cid, rows, { mtimeMs = null, fullRows = null } =
   }
   if (fullRows) {
     const fullPath = path.join(logsDir, "transcript_full.jsonl");
-    fs.writeFileSync(
-      fullPath,
-      `${fullRows.map((r) => JSON.stringify(r)).join("\n")}\n`,
-      "utf8",
-    );
+    fs.writeFileSync(fullPath, `${fullRows.map((r) => JSON.stringify(r)).join("\n")}\n`, "utf8");
   }
   return tPath;
 }
@@ -209,9 +201,7 @@ describe("Suite 1: Classification, gating, summaryCache freshness, and path safe
             includeSubagents: true,
           });
           assert.equal(snapAll.conversations.length, 3);
-          const byId = Object.fromEntries(
-            snapAll.conversations.map((c) => [c.conversationId, c]),
-          );
+          const byId = Object.fromEntries(snapAll.conversations.map((c) => [c.conversationId, c]));
           assert.equal(byId["sub-1"].kind, "subagent");
           assert.equal(byId["sub-1"].parentConversationId, "inter-1");
           assert.equal(byId["bg-1"].kind, "background");
@@ -247,7 +237,12 @@ describe("Suite 1: Classification, gating, summaryCache freshness, and path safe
         "bg-older",
         [
           { type: "USER_INPUT", content: "Old task" },
-          { type: "PLANNER_RESPONSE", model: "gemini-4-neon", input_tokens: 400, cache_read_tokens: 100 },
+          {
+            type: "PLANNER_RESPONSE",
+            model: "gemini-4-neon",
+            input_tokens: 400,
+            cache_read_tokens: 100,
+          },
         ],
         { mtimeMs: now - 5000 },
       );
@@ -256,7 +251,12 @@ describe("Suite 1: Classification, gating, summaryCache freshness, and path safe
         "bg-newer",
         [
           { type: "USER_INPUT", content: "New task" },
-          { type: "PLANNER_RESPONSE", model: "gemini-4-neon", input_tokens: 600, cache_read_tokens: 200 },
+          {
+            type: "PLANNER_RESPONSE",
+            model: "gemini-4-neon",
+            input_tokens: 600,
+            cache_read_tokens: 200,
+          },
         ],
         { mtimeMs: now - 1000 },
       );
@@ -495,15 +495,10 @@ describe("Suite 3: trajectory bounding", () => {
         step_index: t * 2,
       });
     }
-    const res = analyzeTranscriptRows(
-      "traj-2cp",
-      rows,
-      "2026-11-27T00:00:00Z",
-      null,
-      null,
-      false,
-      { includeDetails: true, annotationTitle: null },
-    );
+    const res = analyzeTranscriptRows("traj-2cp", rows, "2026-11-27T00:00:00Z", null, null, false, {
+      includeDetails: true,
+      annotationTitle: null,
+    });
     const { points, totalTurnCount, checkpointCount, isBounded } = res.trajectory;
     assert.equal(totalTurnCount, 150);
     assert.equal(checkpointCount, 2);
@@ -535,15 +530,10 @@ describe("Suite 3: trajectory bounding", () => {
         cache_read_tokens: 0,
       });
     }
-    const res = analyzeTranscriptRows(
-      "traj-0cp",
-      rows,
-      "2026-11-27T00:00:00Z",
-      null,
-      null,
-      false,
-      { includeDetails: true, annotationTitle: null },
-    );
+    const res = analyzeTranscriptRows("traj-0cp", rows, "2026-11-27T00:00:00Z", null, null, false, {
+      includeDetails: true,
+      annotationTitle: null,
+    });
     const { points, totalTurnCount, checkpointCount, isBounded } = res.trajectory;
     assert.equal(totalTurnCount, 150);
     assert.equal(checkpointCount, 0);
@@ -723,8 +713,14 @@ describe("Suite 6: Plugin precedence, workspace resolution, and workspace invent
       const pA = path.join(paths.pluginsDir, "plug-a");
       fs.mkdirSync(path.join(pA, "rules"), { recursive: true });
       fs.mkdirSync(path.join(pA, "skills", "skill-a"), { recursive: true });
-      fs.writeFileSync(path.join(pA, "plugin.json"), JSON.stringify({ name: "plug-a", disabled: true }));
-      fs.writeFileSync(path.join(pA, "mcp_config.json"), JSON.stringify({ mcpServers: { srvA: {} } }));
+      fs.writeFileSync(
+        path.join(pA, "plugin.json"),
+        JSON.stringify({ name: "plug-a", disabled: true }),
+      );
+      fs.writeFileSync(
+        path.join(pA, "mcp_config.json"),
+        JSON.stringify({ mcpServers: { srvA: {} } }),
+      );
       fs.writeFileSync(path.join(pA, "rules", "rule-a.md"), "rule a");
       fs.writeFileSync(path.join(pA, "skills", "skill-a", "SKILL.md"), "---\nname: skill-a\n---\n");
 
@@ -733,7 +729,10 @@ describe("Suite 6: Plugin precedence, workspace resolution, and workspace invent
       fs.mkdirSync(path.join(pB, "rules"), { recursive: true });
       fs.mkdirSync(path.join(pB, "skills", "skill-b"), { recursive: true });
       fs.writeFileSync(path.join(pB, "plugin.json"), JSON.stringify({ name: "plug-b" }));
-      fs.writeFileSync(path.join(pB, "mcp_config.json"), JSON.stringify({ mcpServers: { srvB: {} } }));
+      fs.writeFileSync(
+        path.join(pB, "mcp_config.json"),
+        JSON.stringify({ mcpServers: { srvB: {} } }),
+      );
       fs.writeFileSync(path.join(pB, "rules", "rule-b.md"), "rule b");
       fs.writeFileSync(path.join(pB, "skills", "skill-b", "SKILL.md"), "---\nname: skill-b\n---\n");
 
@@ -757,8 +756,14 @@ describe("Suite 6: Plugin precedence, workspace resolution, and workspace invent
       const srvMap = Object.fromEntries(inv.mcp.servers.map((s) => [s.name, s]));
       assert.equal(srvMap.srvA.active, true);
       assert.equal(srvMap.srvB.active, false);
-      assert.deepEqual(inv.rules.items.map((r) => r.name), ["plug-a/rule-a.md"]);
-      assert.deepEqual(inv.skills.items.map((s) => s.name), ["skill-a"]);
+      assert.deepEqual(
+        inv.rules.items.map((r) => r.name),
+        ["plug-a/rule-a.md"],
+      );
+      assert.deepEqual(
+        inv.skills.items.map((s) => s.name),
+        ["skill-a"],
+      );
 
       // Malformed config.json falls back cleanly to plugin.json disabled flag
       fs.writeFileSync(path.join(paths.configDir, "config.json"), "{broken json");
@@ -1028,10 +1033,19 @@ describe("Suite 7: fetchConversationServiceTitles", () => {
 describe("Suite 8: preferences.mjs store and validation", () => {
   it("resolves --data-dir flags and env vars while ignoring unexpanded ${PLUGIN_DATA}", () => {
     assert.equal(resolveDataDir(["--data-dir=/tmp/ctx-data"], {}), path.resolve("/tmp/ctx-data"));
-    assert.equal(resolveDataDir(["--data-dir", "/tmp/ctx-data-2"], {}), path.resolve("/tmp/ctx-data-2"));
-    assert.equal(resolveDataDir([], { CONTEXT_MONITOR_DATA_DIR: "/tmp/ctx-env" }), path.resolve("/tmp/ctx-env"));
+    assert.equal(
+      resolveDataDir(["--data-dir", "/tmp/ctx-data-2"], {}),
+      path.resolve("/tmp/ctx-data-2"),
+    );
+    assert.equal(
+      resolveDataDir([], { CONTEXT_MONITOR_DATA_DIR: "/tmp/ctx-env" }),
+      path.resolve("/tmp/ctx-env"),
+    );
     assert.equal(resolveDataDir(["--data-dir=${PLUGIN_DATA}"], {}), null);
-    assert.equal(resolveDataDir(["--data-dir", "   "], { CONTEXT_MONITOR_DATA_DIR: "${PLUGIN_DATA}" }), null);
+    assert.equal(
+      resolveDataDir(["--data-dir", "   "], { CONTEXT_MONITOR_DATA_DIR: "${PLUGIN_DATA}" }),
+      null,
+    );
     assert.equal(resolveDataDir([], {}), null);
   });
 
@@ -1069,8 +1083,14 @@ describe("Suite 8: preferences.mjs store and validation", () => {
       assert.deepEqual(loadPreferences(dataDir), saved);
 
       // Invalid workspace paths rejected
-      assert.throws(() => savePreferences(dataDir, { workspacePath: "/" }), /Invalid workspacePath/);
-      assert.throws(() => savePreferences(dataDir, { workspacePath: os.homedir() }), /Invalid workspacePath/);
+      assert.throws(
+        () => savePreferences(dataDir, { workspacePath: "/" }),
+        /Invalid workspacePath/,
+      );
+      assert.throws(
+        () => savePreferences(dataDir, { workspacePath: os.homedir() }),
+        /Invalid workspacePath/,
+      );
       assert.throws(
         () => savePreferences(dataDir, { workspacePath: path.join(root, "nonexistent") }),
         /Invalid workspacePath/,
@@ -1103,7 +1123,11 @@ describe("Suite 8: preferences.mjs store and validation", () => {
       });
       const hugeDir = path.join(root, "a".repeat(4200));
       // Cannot exceed 4096 via normal dir if OS path max < 4096, so test in-memory mode with null dataDir
-      const inMem = savePreferences(null, { includeSubagents: true }, { workspacePath: null, includeSubagents: false, persisted: false });
+      const inMem = savePreferences(
+        null,
+        { includeSubagents: true },
+        { workspacePath: null, includeSubagents: false, persisted: false },
+      );
       assert.deepEqual(inMem, { workspacePath: null, includeSubagents: true, persisted: false });
       assert.ok(hugeDir.length > 4096);
     } finally {
@@ -1131,7 +1155,9 @@ describe("Suite 9: listKnownWorkspaces, saved workspace precedence, and fileUri"
         path.join(paths.projectsDir, "p-unnamed.json"),
         JSON.stringify({
           id: "p-unnamed",
-          projectResources: { resources: [{ localFolder: { folderUri: pathToFileURL(wsA).href } }] },
+          projectResources: {
+            resources: [{ localFolder: { folderUri: pathToFileURL(wsA).href } }],
+          },
         }),
       );
       fs.writeFileSync(
@@ -1181,10 +1207,10 @@ describe("Suite 9: listKnownWorkspaces, saved workspace precedence, and fileUri"
       assert.deepEqual(known[1], { id: "p-beta", name: "Beta Project", path: realWsB });
 
       // Precedence: arg > project_id > mcp_roots > saved > none
-      assert.deepEqual(
-        scanLocalInventory({ geminiHome, savedWorkspacePath: wsSaved }).workspace,
-        { path: realWsSaved, source: "saved" },
-      );
+      assert.deepEqual(scanLocalInventory({ geminiHome, savedWorkspacePath: wsSaved }).workspace, {
+        path: realWsSaved,
+        source: "saved",
+      });
       assert.deepEqual(
         scanLocalInventory({
           geminiHome,
@@ -1501,7 +1527,7 @@ describe("Suite 11: Trajectory chart markup, ARIA slider, and scrubbing math", (
   it("renders empty and single-point fallback states without SVG or slider", () => {
     const emptyHtml = renderTrajectoryChart({ points: [] }, 1_000_000);
     assert.match(emptyHtml, /class="traj-empty"/);
-    assert.equal(emptyHtml.includes("role=\"slider\""), false);
+    assert.equal(emptyHtml.includes('role="slider"'), false);
     assert.equal(emptyHtml.includes("<svg"), false);
 
     const singlePt = {
@@ -1514,7 +1540,7 @@ describe("Suite 11: Trajectory chart markup, ARIA slider, and scrubbing math", (
     const singleHtml = renderTrajectoryChart({ points: [singlePt] }, 1_000_000);
     assert.match(singleHtml, /class="traj-single"/);
     assert.ok(singleHtml.includes(formatTrajectoryReadout(singlePt)));
-    assert.equal(singleHtml.includes("role=\"slider\""), false);
+    assert.equal(singleHtml.includes('role="slider"'), false);
     assert.equal(singleHtml.includes("<svg"), false);
   });
 
@@ -1522,9 +1548,27 @@ describe("Suite 11: Trajectory chart markup, ARIA slider, and scrubbing math", (
     const trajectory = {
       points: [
         { turn: 1, activeTokens: 20_000, cacheReadTokens: 0, outputTokens: 100, kind: "turn" },
-        { turn: 8, activeTokens: 780_000, cacheReadTokens: 600_000, outputTokens: 400, kind: "checkpoint_peak" },
-        { turn: 9, activeTokens: 120_000, cacheReadTokens: 80_000, outputTokens: 250, kind: "checkpoint_baseline" },
-        { turn: 42, activeTokens: 350_000, cacheReadTokens: 300_000, outputTokens: 320, kind: "turn" },
+        {
+          turn: 8,
+          activeTokens: 780_000,
+          cacheReadTokens: 600_000,
+          outputTokens: 400,
+          kind: "checkpoint_peak",
+        },
+        {
+          turn: 9,
+          activeTokens: 120_000,
+          cacheReadTokens: 80_000,
+          outputTokens: 250,
+          kind: "checkpoint_baseline",
+        },
+        {
+          turn: 42,
+          activeTokens: 350_000,
+          cacheReadTokens: 300_000,
+          outputTokens: 320,
+          kind: "turn",
+        },
       ],
       totalTurnCount: 150,
       checkpointCount: 1,
@@ -1555,10 +1599,21 @@ describe("Suite 11: Trajectory chart markup, ARIA slider, and scrubbing math", (
     assert.ok(idleHtml.includes('aria-valuemin="1"'));
     assert.ok(idleHtml.includes('aria-valuemax="4"'));
     assert.ok(idleHtml.includes('aria-valuenow="4"'));
-    assert.ok(idleHtml.includes(`aria-valuetext="${formatTrajectoryReadout(trajectory.points[3])}"`));
-    assert.match(idleHtml, /class="traj-crosshair"[^>]*data-slot="traj-crosshair"[^>]*data-active="false"/);
-    assert.match(idleHtml, /class="traj-cache-dot"[^>]*data-slot="traj-cache-dot"[^>]*data-active="false"[^>]*style="left:100\.00%;top:70\.00%"/);
-    assert.match(idleHtml, /class="traj-active-dot"[^>]*data-slot="traj-active-dot"[^>]*data-active="false"[^>]*style="left:100\.00%;top:65\.00%"/);
+    assert.ok(
+      idleHtml.includes(`aria-valuetext="${formatTrajectoryReadout(trajectory.points[3])}"`),
+    );
+    assert.match(
+      idleHtml,
+      /class="traj-crosshair"[^>]*data-slot="traj-crosshair"[^>]*data-active="false"/,
+    );
+    assert.match(
+      idleHtml,
+      /class="traj-cache-dot"[^>]*data-slot="traj-cache-dot"[^>]*data-active="false"[^>]*style="left:100\.00%;top:70\.00%"/,
+    );
+    assert.match(
+      idleHtml,
+      /class="traj-active-dot"[^>]*data-slot="traj-active-dot"[^>]*data-active="false"[^>]*style="left:100\.00%;top:65\.00%"/,
+    );
     assert.ok(idleHtml.includes('class="traj-cp-peak"'));
     assert.ok(idleHtml.includes('class="traj-cp-base"'));
     assert.ok(idleHtml.includes('class="traj-caption"'));
@@ -1567,14 +1622,31 @@ describe("Suite 11: Trajectory chart markup, ARIA slider, and scrubbing math", (
     const scrubHtml = renderTrajectoryChart(trajectory, 1_000_000, 1);
     assert.match(scrubHtml, /class="traj-readout"[^>]*data-scrubbing="true"/);
     assert.ok(scrubHtml.includes('aria-valuenow="2"'));
-    assert.ok(scrubHtml.includes(`aria-valuetext="${formatTrajectoryReadout(trajectory.points[1])}"`));
-    assert.match(scrubHtml, /class="traj-crosshair"[^>]*data-slot="traj-crosshair"[^>]*data-active="true"/);
-    assert.match(scrubHtml, /class="traj-cache-dot"[^>]*data-slot="traj-cache-dot"[^>]*data-active="true"[^>]*style="left:33\.33%;top:40\.00%"/);
-    assert.match(scrubHtml, /class="traj-active-dot"[^>]*data-slot="traj-active-dot"[^>]*data-active="true"[^>]*style="left:33\.33%;top:22\.00%"/);
+    assert.ok(
+      scrubHtml.includes(`aria-valuetext="${formatTrajectoryReadout(trajectory.points[1])}"`),
+    );
+    assert.match(
+      scrubHtml,
+      /class="traj-crosshair"[^>]*data-slot="traj-crosshair"[^>]*data-active="true"/,
+    );
+    assert.match(
+      scrubHtml,
+      /class="traj-cache-dot"[^>]*data-slot="traj-cache-dot"[^>]*data-active="true"[^>]*style="left:33\.33%;top:40\.00%"/,
+    );
+    assert.match(
+      scrubHtml,
+      /class="traj-active-dot"[^>]*data-slot="traj-active-dot"[^>]*data-active="true"[^>]*style="left:33\.33%;top:22\.00%"/,
+    );
   });
 
   it("computes trajectory geometry and maps pointer clientX to nearest point index", () => {
-    assert.equal(computeTrajectoryGeometry({ points: [{ turn: 1, activeTokens: 100, cacheReadTokens: 0 }] }, 1000), null);
+    assert.equal(
+      computeTrajectoryGeometry(
+        { points: [{ turn: 1, activeTokens: 100, cacheReadTokens: 0 }] },
+        1000,
+      ),
+      null,
+    );
 
     const geom = computeTrajectoryGeometry(
       {

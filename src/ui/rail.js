@@ -34,7 +34,11 @@ export function renderFleetKpis(fleet) {
   `;
 }
 
-export function renderRailList(items, selectedConversationId, { loading = false, error = null } = {}) {
+export function renderRailList(
+  items,
+  selectedConversationId,
+  { loading = false, error = null } = {},
+) {
   if (error) {
     return `<div class="rail-empty" role="alert">${escapeHtml(error)}</div>`;
   }
@@ -55,9 +59,10 @@ export function renderRailList(items, selectedConversationId, { loading = false,
   return items
     .map((conv) => {
       const isSelected = conv.conversationId === selectedConversationId;
-      const pct = conv.usedPercent !== null && conv.usedPercent !== undefined
-        ? Math.round(conv.usedPercent)
-        : null;
+      const pct =
+        conv.usedPercent !== null && conv.usedPercent !== undefined
+          ? Math.round(conv.usedPercent)
+          : null;
       const barWidth = pct !== null ? Math.max(2, Math.min(100, conv.usedPercent)) : 0;
       const isHigh = pct !== null && conv.usedPercent >= 70;
       const isRunning = conv.runState === "RUN_STATE_RUNNING";
@@ -95,10 +100,7 @@ export function renderRailList(items, selectedConversationId, { loading = false,
 }
 
 export function renderRailFooter({ shown, totalMatching, hasMore, loadingMore }) {
-  const countText =
-    totalMatching > 0
-      ? `Showing ${shown} of ${totalMatching}`
-      : "0 matching";
+  const countText = totalMatching > 0 ? `Showing ${shown} of ${totalMatching}` : "0 matching";
   const moreBtn = hasMore
     ? `<button type="button" id="rail-load-more" class="pill-btn" ${loadingMore ? "disabled" : ""}>${loadingMore ? "Loading…" : "Load more"}</button>`
     : "";

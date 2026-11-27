@@ -37,7 +37,9 @@ export function hashTree(dirPath) {
   if (!fs.existsSync(dirPath)) return hashes;
 
   function walk(cur) {
-    const entries = fs.readdirSync(cur, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name));
+    const entries = fs
+      .readdirSync(cur, { withFileTypes: true })
+      .sort((a, b) => a.name.localeCompare(b.name));
     for (const entry of entries) {
       const full = path.join(cur, entry.name);
       if (entry.isDirectory()) {
@@ -179,9 +181,7 @@ if (isCli) {
     const opts = parseArgs(process.argv.slice(2));
     const res = syncPlugin(opts);
     const { added, updated, unchanged, removed } = res.diff;
-    console.log(
-      `[${res.dryRun ? "DRY-RUN" : "SYNCED"}] v${res.version} -> ${res.target}`,
-    );
+    console.log(`[${res.dryRun ? "DRY-RUN" : "SYNCED"}] v${res.version} -> ${res.target}`);
     console.log(
       `added=${added.length} updated=${updated.length} unchanged=${unchanged.length} removed=${removed.length}`,
     );
@@ -191,7 +191,9 @@ if (isCli) {
     if (!res.dryRun) {
       console.log("");
       console.log("Manual reload required:");
-      console.log("  Open Antigravity Desktop settings -> MCP Servers -> reload context-monitor_context-monitor.");
+      console.log(
+        "  Open Antigravity Desktop settings -> MCP Servers -> reload context-monitor_context-monitor.",
+      );
     }
   } catch (err) {
     console.error(`[FAIL] ${err.message}`);

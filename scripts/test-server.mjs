@@ -29,10 +29,7 @@ function assertSnapshotInvariants(snap, label) {
       "number",
       `${label} freePercent must be a number when contextWindow is known`,
     );
-    const segPctSum = snap.current.segments.reduce(
-      (a, s) => a + (s.percent || 0),
-      0,
-    );
+    const segPctSum = snap.current.segments.reduce((a, s) => a + (s.percent || 0), 0);
     assert.equal(
       Math.round((segPctSum + snap.current.exact.freePercent) * 10),
       1000,
@@ -115,9 +112,7 @@ async function runLiveSmokeTests() {
 
     // 2. Verify UI resource
     const resList = await client.listResources();
-    const uiRes = resList.resources.find(
-      (r) => r.uri === "ui://context-monitor/app.html",
-    );
+    const uiRes = resList.resources.find((r) => r.uri === "ui://context-monitor/app.html");
     assert.ok(uiRes, "ui://context-monitor/app.html missing from resources/list");
     assert.equal(uiRes.mimeType, "text/html;profile=mcp-app");
 
@@ -128,14 +123,10 @@ async function runLiveSmokeTests() {
     assert.ok(item?.text && item.text.length > 500, "HTML resource empty");
     assert.equal(item.mimeType, "text/html;profile=mcp-app");
     assert.ok(
-      !item.text.includes("/* __INLINE_JS__ */") &&
-        !item.text.includes("/* __INLINE_CSS__ */"),
+      !item.text.includes("/* __INLINE_JS__ */") && !item.text.includes("/* __INLINE_CSS__ */"),
       "Unreplaced inline bundle placeholder found in app.html",
     );
-    assert.ok(
-      Buffer.byteLength(item.text, "utf8") < 10 * 1024 * 1024,
-      "HTML exceeds 10 MiB limit",
-    );
+    assert.ok(Buffer.byteLength(item.text, "utf8") < 10 * 1024 * 1024, "HTML exceeds 10 MiB limit");
 
     // 3. Call open_context_monitor with empty {} (simulating sidebar / aux_pane launch)
     const openRes = await client.callTool({
@@ -165,21 +156,9 @@ async function runLiveSmokeTests() {
 
     if (snap.current?.hasUsageData) {
       assertSnapshotInvariants(snap, "open_context_monitor");
-      assert.equal(
-        snap.current.trajectory,
-        undefined,
-        "open_context_monitor must omit trajectory",
-      );
-      assert.equal(
-        snap.current.topTools,
-        undefined,
-        "open_context_monitor must omit topTools",
-      );
-      assert.equal(
-        snap.current.artifacts,
-        undefined,
-        "open_context_monitor must omit artifacts",
-      );
+      assert.equal(snap.current.trajectory, undefined, "open_context_monitor must omit trajectory");
+      assert.equal(snap.current.topTools, undefined, "open_context_monitor must omit topTools");
+      assert.equal(snap.current.artifacts, undefined, "open_context_monitor must omit artifacts");
     }
 
     // 4. Test get_context_snapshot detail hydration on checkpoint thread (or latest thread)
@@ -201,7 +180,10 @@ async function runLiveSmokeTests() {
 
       const cpPayloadBytes = Buffer.byteLength(JSON.stringify(cpSnap), "utf8");
       const cpFullBytes = Buffer.byteLength(JSON.stringify(cpRes), "utf8");
-      assert.ok(cpPayloadBytes < 1024 * 1024, "get_context_snapshot structuredContent exceeds 1 MiB");
+      assert.ok(
+        cpPayloadBytes < 1024 * 1024,
+        "get_context_snapshot structuredContent exceeds 1 MiB",
+      );
       assert.ok(cpFullBytes < 1024 * 1024, "get_context_snapshot CallToolResult exceeds 1 MiB");
 
       if (cpSnap.current?.hasUsageData) {
@@ -357,7 +339,9 @@ async function runMcpRootsTests() {
       "timeout must not be cached",
     );
 
-    console.log("Verified MCP roots/list resolution, listChanged caching/invalidation, and 250ms timeout fallback!");
+    console.log(
+      "Verified MCP roots/list resolution, listChanged caching/invalidation, and 250ms timeout fallback!",
+    );
   } finally {
     await client.close();
     fs.rmSync(tmpRoot, { recursive: true, force: true });
@@ -406,7 +390,12 @@ async function runPreferencesAndFleetServerTests() {
     [
       { type: "USER_INPUT", content: "High usage" },
       { type: "CHECKPOINT" },
-      { type: "PLANNER_RESPONSE", model: "gemini-4-neon", input_tokens: 400_000, cache_read_tokens: 0 },
+      {
+        type: "PLANNER_RESPONSE",
+        model: "gemini-4-neon",
+        input_tokens: 400_000,
+        cache_read_tokens: 0,
+      },
     ],
     now - 2000,
     "Interactive One",
@@ -415,7 +404,12 @@ async function runPreferencesAndFleetServerTests() {
     "bg-1",
     [
       { type: "USER_INPUT", content: "Bg task" },
-      { type: "PLANNER_RESPONSE", model: "gemini-4-neon", input_tokens: 10_000, cache_read_tokens: 0 },
+      {
+        type: "PLANNER_RESPONSE",
+        model: "gemini-4-neon",
+        input_tokens: 10_000,
+        cache_read_tokens: 0,
+      },
     ],
     now - 1000,
     null,
@@ -528,7 +522,9 @@ async function runPreferencesAndFleetServerTests() {
       await c3.close();
     }
 
-    console.log("Verified preferences persistence across restart, fleet list_conversations, and unexpanded ${PLUGIN_DATA} fallback!");
+    console.log(
+      "Verified preferences persistence across restart, fleet list_conversations, and unexpanded ${PLUGIN_DATA} fallback!",
+    );
   } finally {
     fs.rmSync(tmpRoot, { recursive: true, force: true });
   }
