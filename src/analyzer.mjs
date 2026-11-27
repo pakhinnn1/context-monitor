@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const MODEL_CATALOG = [
   {
@@ -660,6 +660,8 @@ export function scanConversationArtifacts(conversationId, paths = resolvePaths()
       try {
         const st = fs.statSync(fullPath);
         if (!st.isFile()) continue;
+        const fileUri = safeRealFileUri(fullPath, convDir);
+        if (!fileUri) continue;
 
         const meta = readJsonSafe(`${fullPath}.metadata.json`);
         const userFacing = Boolean(meta?.userFacing ?? meta?.UserFacing);
@@ -681,6 +683,7 @@ export function scanConversationArtifacts(conversationId, paths = resolvePaths()
           mtimeMs: st.mtimeMs,
           userFacing,
           summary,
+          fileUri,
         });
       } catch {
         // Skip unreadable entries
@@ -1194,7 +1197,78 @@ function resolveFileUriWorkspace(uri) {
   }
 }
 
-function resolveWorkspaceRoot({ workspacePath, mcpRoots, projectId }, paths) {
+function safeRealFileUri(filePath, allowedRoot = null) {
+  try {
+    const real = fs.realpathSync(filePath);
+    const st = fs.statSync(real);
+    if (!st.isFile()) return null;
+    if (allowedRoot) {
+      const rootReal = fs.realpathSync(allowedRoot);
+      if (real !== rootReal && !real.startsWith(rootReal + path.sep)) {
+        return null;
+      }
+    }
+    return pathToFileURL(real).href;
+  } catch {
+    return null;
+  }
+}
+
+function resolveProjectWorkspacePath(projectJson) {
+  const resources = projectJson?.projectResources?.resources;
+  if (!Array.isArray(resources)) return null;
+  for (const res of resources) {
+    const uri =
+      res?.gitFolder?.folderUri ||
+      res?.localFolder?.folderUri ||
+      res?.folderUri ||
+      null;
+    const resolved = resolveFileUriWorkspace(uri);
+    if (resolved) return resolved;
+  }
+  return null;
+}
+
+export function listKnownWorkspaces(paths = resolvePaths()) {
+  const byPath = new Map();
+  try {
+    for (const dirent of fs.readdirSync(paths.projectsDir, { withFileTypes: true })) {
+      if (!dirent.isFile() || !dirent.name.endsWith(".json")) continue;
+      const projectJson = readJsonSafe(path.join(paths.projectsDir, dirent.name));
+      if (!projectJson || typeof projectJson !== "object") continue;
+      const resolvedPath = resolveProjectWorkspacePath(projectJson);
+      if (!resolvedPath) continue;
+
+      const id =
+        typeof projectJson.id === "string" && projectJson.id.trim()
+          ? projectJson.id.trim()
+          : dirent.name.replace(/\.json$/, "");
+      const explicitName =
+        typeof projectJson.name === "string" && projectJson.name.trim()
+          ? projectJson.name.trim()
+          : "";
+      const hasExplicitName = Boolean(explicitName);
+      const name = explicitName || path.basename(resolvedPath) || resolvedPath;
+
+      const existing = byPath.get(resolvedPath);
+      if (!existing || (!existing.hasExplicitName && hasExplicitName)) {
+        byPath.set(resolvedPath, { id, name, path: resolvedPath, hasExplicitName });
+      }
+    }
+  } catch {
+    // Missing or unreadable projects directory
+  }
+
+  return Array.from(byPath.values())
+    .sort((a, b) => a.name.localeCompare(b.name) || a.path.localeCompare(b.path))
+    .slice(0, 50)
+    .map(({ id, name, path: wsPath }) => ({ id, name, path: wsPath }));
+}
+
+function resolveWorkspaceRoot(
+  { workspacePath, mcpRoots, projectId, savedWorkspacePath },
+  paths,
+) {
   const argWorkspace = validateWorkspaceDir(workspacePath);
   if (argWorkspace) {
     return { path: argWorkspace, source: "arg" };
@@ -1202,19 +1276,9 @@ function resolveWorkspaceRoot({ workspacePath, mcpRoots, projectId }, paths) {
 
   if (isSafeSingleSegment(projectId)) {
     const projectJson = readJsonSafe(path.join(paths.projectsDir, `${projectId}.json`));
-    const resources = projectJson?.projectResources?.resources;
-    if (Array.isArray(resources)) {
-      for (const res of resources) {
-        const uri =
-          res?.gitFolder?.folderUri ||
-          res?.localFolder?.folderUri ||
-          res?.folderUri ||
-          null;
-        const resolved = resolveFileUriWorkspace(uri);
-        if (resolved) {
-          return { path: resolved, source: "project_id" };
-        }
-      }
+    const resolved = resolveProjectWorkspacePath(projectJson);
+    if (resolved) {
+      return { path: resolved, source: "project_id" };
     }
   }
 
@@ -1225,6 +1289,11 @@ function resolveWorkspaceRoot({ workspacePath, mcpRoots, projectId }, paths) {
         return { path: resolved, source: "mcp_roots" };
       }
     }
+  }
+
+  const savedWorkspace = validateWorkspaceDir(savedWorkspacePath);
+  if (savedWorkspace) {
+    return { path: savedWorkspace, source: "saved" };
   }
 
   return { path: null, source: "none" };
@@ -1279,6 +1348,7 @@ export function scanLocalInventory({
   workspacePath,
   mcpRoots,
   projectId,
+  savedWorkspacePath,
   geminiHome,
 } = {}) {
   const paths = resolvePaths({ geminiHome });
@@ -1339,12 +1409,15 @@ export function scanLocalInventory({
           try {
             const st = fs.statSync(full);
             if (st.isFile()) {
+              const fileUri = safeRealFileUri(full, pluginDir);
+              if (!fileUri) continue;
               pluginRules.push({
                 name: `${entry.name}/${rf}`,
                 scope: "plugin",
                 bytes: st.size,
                 estTokens: Math.round(st.size / 4),
                 overPerFileCap: st.size > PER_FILE_RULE_BYTE_CAP,
+                fileUri,
               });
             }
           } catch {}
@@ -1399,19 +1472,25 @@ export function scanLocalInventory({
     try {
       const st = fs.statSync(candidate.filePath);
       if (st.isFile()) {
+        const fileUri = safeRealFileUri(candidate.filePath, paths.geminiHome);
+        if (!fileUri) continue;
         rules.push({
           name: candidate.name,
           scope: candidate.scope,
           bytes: st.size,
           estTokens: Math.round(st.size / 4),
           overPerFileCap: st.size > PER_FILE_RULE_BYTE_CAP,
+          fileUri,
         });
       }
     } catch {}
   }
 
   // Workspace rules and skills
-  const workspace = resolveWorkspaceRoot({ workspacePath, mcpRoots, projectId }, paths);
+  const workspace = resolveWorkspaceRoot(
+    { workspacePath, mcpRoots, projectId, savedWorkspacePath },
+    paths,
+  );
   if (workspace.path) {
     const seenRuleRealPaths = new Set();
     const seenSkillRealPaths = new Set();
@@ -1429,6 +1508,7 @@ export function scanLocalInventory({
           bytes: resolved.size,
           estTokens: Math.round(resolved.size / 4),
           overPerFileCap: resolved.size > PER_FILE_RULE_BYTE_CAP,
+          fileUri: pathToFileURL(resolved.real).href,
         });
       }
     }
@@ -1450,6 +1530,7 @@ export function scanLocalInventory({
               bytes: resolved.size,
               estTokens: Math.round(resolved.size / 4),
               overPerFileCap: resolved.size > PER_FILE_RULE_BYTE_CAP,
+              fileUri: pathToFileURL(resolved.real).href,
             });
           }
         }
@@ -1551,6 +1632,7 @@ export function scanLocalInventory({
 
   return {
     workspace,
+    knownWorkspaces: listKnownWorkspaces(paths),
     mcp: {
       servers: mcpServers.slice(0, 100),
       activeServerCount: activeMcpServers.length,
@@ -1575,19 +1657,7 @@ export function scanLocalInventory({
   };
 }
 
-export async function getContextSnapshot({
-  conversationId,
-  limit = 35,
-  includeSubagents = false,
-  includeDetails = true,
-  workspacePath,
-  mcpRoots,
-  geminiHome,
-} = {}) {
-  const paths = resolvePaths({ geminiHome });
-  const safeLimit = Math.max(1, Math.min(100, Number(limit) || 35));
-  const { map: serviceMap, status: serviceStatus } = await fetchConversationServiceTitles(200);
-
+function scanBrainTranscripts(paths) {
   const transcriptEntries = [];
   const seenTranscriptPaths = new Set();
   try {
@@ -1630,6 +1700,23 @@ export async function getContextSnapshot({
   }
 
   transcriptEntries.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  return transcriptEntries;
+}
+
+export async function getContextSnapshot({
+  conversationId,
+  limit = 35,
+  includeSubagents = false,
+  includeDetails = true,
+  workspacePath,
+  savedWorkspacePath,
+  mcpRoots,
+  geminiHome,
+} = {}) {
+  const paths = resolvePaths({ geminiHome });
+  const safeLimit = Math.max(1, Math.min(100, Number(limit) || 35));
+  const { map: serviceMap, status: serviceStatus } = await fetchConversationServiceTitles(200);
+  const transcriptEntries = scanBrainTranscripts(paths);
 
   const candidateEntries = [];
   if (includeSubagents) {
@@ -1722,6 +1809,7 @@ export async function getContextSnapshot({
     workspacePath,
     mcpRoots: resolvedMcpRoots,
     projectId: selectedProjectId,
+    savedWorkspacePath,
     geminiHome,
   });
 
@@ -1735,5 +1823,152 @@ export async function getContextSnapshot({
     current,
     conversations,
     inventory,
+  };
+}
+
+export async function listConversations({
+  query = "",
+  kind = "interactive",
+  filter = "all",
+  sort = "recent",
+  offset = 0,
+  limit = 35,
+  geminiHome,
+} = {}) {
+  const paths = resolvePaths({ geminiHome });
+  const { map: serviceMap, status: serviceStatus } = await fetchConversationServiceTitles(200);
+  const transcriptEntries = scanBrainTranscripts(paths);
+
+  const q = typeof query === "string" ? query.trim().toLowerCase() : "";
+  const safeKind = ["interactive", "all", "subagent", "background"].includes(kind)
+    ? kind
+    : "interactive";
+  const safeFilter = ["all", "high_usage", "checkpointed", "running"].includes(filter)
+    ? filter
+    : "all";
+  const safeSort = ["recent", "usage_desc", "tokens_desc", "checkpoints_desc"].includes(sort)
+    ? sort
+    : "recent";
+  const safeOffset = Math.max(0, Math.floor(Number(offset) || 0));
+  const safeLimit = Math.max(1, Math.min(100, Math.floor(Number(limit) || 35)));
+
+  const interactiveEntries = [];
+  const nonInteractiveEntries = [];
+  for (const entry of transcriptEntries) {
+    const pbtxtPath = path.join(paths.annotationsDir, `${entry.conversationId}.pbtxt`);
+    const hasAnnotation = fs.existsSync(pbtxtPath);
+    const svc = serviceMap.get(entry.conversationId);
+    const entryKind = classifyConversationKind(hasAnnotation, svc);
+    if (entryKind === "interactive") {
+      interactiveEntries.push({ ...entry, entryKind, svc });
+    } else {
+      nonInteractiveEntries.push({ ...entry, entryKind, svc });
+    }
+  }
+
+  const interactiveSummaries = [];
+  let highUsageInteractiveCount = 0;
+  let checkpointedInteractiveCount = 0;
+  let runningCount = 0;
+
+  for (const entry of interactiveEntries) {
+    const summary = summarizeConversationFast(
+      entry.conversationId,
+      entry.transcriptPath,
+      entry.mtimeMs,
+      entry.svc,
+      paths,
+    );
+    if (!summary) continue;
+    interactiveSummaries.push(summary);
+    if (summary.usedPercent !== null && summary.usedPercent >= 70) {
+      highUsageInteractiveCount += 1;
+    }
+    if (summary.checkpointCount > 0) {
+      checkpointedInteractiveCount += 1;
+    }
+    if (summary.runState === "RUN_STATE_RUNNING") {
+      runningCount += 1;
+    }
+  }
+
+  const fleet = {
+    totalTracked: transcriptEntries.length,
+    interactiveCount: interactiveEntries.length,
+    nonInteractiveCount: transcriptEntries.length - interactiveEntries.length,
+    highUsageInteractiveCount,
+    checkpointedInteractiveCount,
+    runningCount,
+    fleetScope: "interactive",
+  };
+
+  let pool = [];
+  if (safeKind === "interactive") {
+    pool = interactiveSummaries;
+  } else {
+    if (safeKind === "all") {
+      pool = [...interactiveSummaries];
+    }
+    for (const entry of nonInteractiveEntries) {
+      if (safeKind === "subagent" && entry.entryKind !== "subagent") continue;
+      if (safeKind === "background" && entry.entryKind !== "background") continue;
+      if (safeFilter === "running" && entry.svc?.runState !== "RUN_STATE_RUNNING") {
+        continue;
+      }
+      const summary = summarizeConversationFast(
+        entry.conversationId,
+        entry.transcriptPath,
+        entry.mtimeMs,
+        entry.svc,
+        paths,
+      );
+      if (summary) pool.push(summary);
+    }
+  }
+
+  if (safeFilter === "high_usage") {
+    pool = pool.filter((item) => item.usedPercent !== null && item.usedPercent >= 70);
+  } else if (safeFilter === "checkpointed") {
+    pool = pool.filter((item) => item.checkpointCount > 0);
+  } else if (safeFilter === "running") {
+    pool = pool.filter((item) => item.runState === "RUN_STATE_RUNNING");
+  }
+
+  if (q) {
+    pool = pool.filter((item) => {
+      const fields = [item.title, item.conversationId, item.modelName, item.modelId];
+      return fields.some((f) => typeof f === "string" && f.toLowerCase().includes(q));
+    });
+  }
+
+  if (safeSort === "usage_desc") {
+    pool.sort((a, b) => {
+      const aNull = a.usedPercent === null;
+      const bNull = b.usedPercent === null;
+      if (aNull !== bNull) return aNull ? 1 : -1;
+      if (!aNull && b.usedPercent !== a.usedPercent) {
+        return b.usedPercent - a.usedPercent;
+      }
+      return b.mtimeMs - a.mtimeMs;
+    });
+  } else if (safeSort === "tokens_desc") {
+    pool.sort((a, b) => b.activeTokens - a.activeTokens || b.mtimeMs - a.mtimeMs);
+  } else if (safeSort === "checkpoints_desc") {
+    pool.sort((a, b) => b.checkpointCount - a.checkpointCount || b.mtimeMs - a.mtimeMs);
+  } else {
+    pool.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  }
+
+  const items = pool.slice(safeOffset, safeOffset + safeLimit);
+  return {
+    schemaVersion: 2,
+    generatedAt: new Date().toISOString(),
+    serviceStatus,
+    fleet,
+    totalMatching: pool.length,
+    offset: safeOffset,
+    limit: safeLimit,
+    hasMore: safeOffset + items.length < pool.length,
+    items,
   };
 }

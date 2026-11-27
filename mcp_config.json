@@ -2,7 +2,7 @@
   "mcpServers": {
     "context-monitor": {
       "command": "node",
-      "args": ["${PLUGIN_ROOT}/dist/server.mjs"]
+      "args": ["${PLUGIN_ROOT}/dist/server.mjs", "--data-dir=${PLUGIN_DATA}"]
     }
   }
 }

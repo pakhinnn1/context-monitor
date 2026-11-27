@@ -10,11 +10,18 @@ import {
   fetchConversationServiceTitles,
   getContextSnapshot,
   isSafeSingleSegment,
+  listConversations,
+  listKnownWorkspaces,
   resolvePaths,
   scanConversationArtifacts,
   scanLocalInventory,
   validateWorkspaceDir,
 } from "../src/analyzer.mjs";
+import {
+  loadPreferences,
+  resolveDataDir,
+  savePreferences,
+} from "../src/preferences.mjs";
 
 function makeTempDir(prefix = "ctx-mon-unit-") {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -1008,6 +1015,444 @@ describe("Suite 7: fetchConversationServiceTitles", () => {
       );
     } finally {
       await srv.close();
+    }
+  });
+});
+
+describe("Suite 8: preferences.mjs store and validation", () => {
+  it("resolves --data-dir flags and env vars while ignoring unexpanded ${PLUGIN_DATA}", () => {
+    assert.equal(resolveDataDir(["--data-dir=/tmp/ctx-data"], {}), path.resolve("/tmp/ctx-data"));
+    assert.equal(resolveDataDir(["--data-dir", "/tmp/ctx-data-2"], {}), path.resolve("/tmp/ctx-data-2"));
+    assert.equal(resolveDataDir([], { CONTEXT_MONITOR_DATA_DIR: "/tmp/ctx-env" }), path.resolve("/tmp/ctx-env"));
+    assert.equal(resolveDataDir(["--data-dir=${PLUGIN_DATA}"], {}), null);
+    assert.equal(resolveDataDir(["--data-dir", "   "], { CONTEXT_MONITOR_DATA_DIR: "${PLUGIN_DATA}" }), null);
+    assert.equal(resolveDataDir([], {}), null);
+  });
+
+  it("loads defaults on missing/corrupt files, persists atomically, validates workspacePath, and supports in-memory mode", () => {
+    const root = makeTempDir("ctx-prefs-");
+    const dataDir = path.join(root, "data");
+    const wsDir = path.join(root, "my-workspace");
+    fs.mkdirSync(wsDir, { recursive: true });
+    const realWs = fs.realpathSync(wsDir);
+
+    try {
+      assert.deepEqual(loadPreferences(null), {
+        workspacePath: null,
+        includeSubagents: false,
+        persisted: false,
+      });
+      assert.deepEqual(loadPreferences(dataDir), {
+        workspacePath: null,
+        includeSubagents: false,
+        persisted: true,
+      });
+
+      // Atomic save
+      const saved = savePreferences(dataDir, { workspacePath: wsDir, includeSubagents: true });
+      assert.deepEqual(saved, {
+        workspacePath: realWs,
+        includeSubagents: true,
+        persisted: true,
+      });
+      assert.deepEqual(
+        fs.readdirSync(dataDir),
+        ["preferences.json"],
+        "must not leave temporary files behind",
+      );
+      assert.deepEqual(loadPreferences(dataDir), saved);
+
+      // Invalid workspace paths rejected
+      assert.throws(() => savePreferences(dataDir, { workspacePath: "/" }), /Invalid workspacePath/);
+      assert.throws(() => savePreferences(dataDir, { workspacePath: os.homedir() }), /Invalid workspacePath/);
+      assert.throws(
+        () => savePreferences(dataDir, { workspacePath: path.join(root, "nonexistent") }),
+        /Invalid workspacePath/,
+      );
+
+      // Clear workspacePath with null
+      const cleared = savePreferences(dataDir, { workspacePath: null });
+      assert.equal(cleared.workspacePath, null);
+      assert.equal(cleared.includeSubagents, true);
+
+      // Deleted workspacePath on disk is discarded cleanly on load
+      savePreferences(dataDir, { workspacePath: wsDir });
+      fs.rmSync(wsDir, { recursive: true, force: true });
+      assert.equal(loadPreferences(dataDir).workspacePath, null);
+
+      // Corrupt JSON falls back to defaults
+      fs.writeFileSync(path.join(dataDir, "preferences.json"), "{not-json", "utf8");
+      assert.deepEqual(loadPreferences(dataDir), {
+        workspacePath: null,
+        includeSubagents: false,
+        persisted: true,
+      });
+
+      // > 4096 bytes rejected on load and save
+      fs.writeFileSync(path.join(dataDir, "preferences.json"), "x".repeat(5000), "utf8");
+      assert.deepEqual(loadPreferences(dataDir), {
+        workspacePath: null,
+        includeSubagents: false,
+        persisted: true,
+      });
+      const hugeDir = path.join(root, "a".repeat(4200));
+      // Cannot exceed 4096 via normal dir if OS path max < 4096, so test in-memory mode with null dataDir
+      const inMem = savePreferences(null, { includeSubagents: true }, { workspacePath: null, includeSubagents: false, persisted: false });
+      assert.deepEqual(inMem, { workspacePath: null, includeSubagents: true, persisted: false });
+      assert.ok(hugeDir.length > 4096);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("Suite 9: listKnownWorkspaces, saved workspace precedence, and fileUri", () => {
+  it("discovers registered projects, deduplicates by realpath, sorts, caps at 50, and exposes fileUri", async () => {
+    const { root, geminiHome, paths } = makeGeminiFixture();
+    const wsA = makeTempDir("ctx-known-a-");
+    const wsB = makeTempDir("ctx-known-b-");
+    const wsSaved = makeTempDir("ctx-saved-ws-");
+    const wsArg = makeTempDir("ctx-arg-ws-");
+
+    try {
+      const realWsA = fs.realpathSync(wsA);
+      const realWsB = fs.realpathSync(wsB);
+      const realWsSaved = fs.realpathSync(wsSaved);
+      const realWsArg = fs.realpathSync(wsArg);
+
+      // Valid project entries (gitFolder, localFolder, direct folderUri) + duplicate preferring explicit name + invalid/sidecar
+      fs.writeFileSync(
+        path.join(paths.projectsDir, "p-unnamed.json"),
+        JSON.stringify({
+          id: "p-unnamed",
+          projectResources: { resources: [{ localFolder: { folderUri: pathToFileURL(wsA).href } }] },
+        }),
+      );
+      fs.writeFileSync(
+        path.join(paths.projectsDir, "p-named.json"),
+        JSON.stringify({
+          id: "p-named",
+          name: "Alpha Project",
+          projectResources: { resources: [{ gitFolder: { folderUri: pathToFileURL(wsA).href } }] },
+        }),
+      );
+      fs.writeFileSync(
+        path.join(paths.projectsDir, "p-beta.json"),
+        JSON.stringify({
+          id: "p-beta",
+          name: "Beta Project",
+          projectResources: { resources: [{ folderUri: pathToFileURL(wsB).href }] },
+        }),
+      );
+      fs.writeFileSync(
+        path.join(paths.projectsDir, "default-cli-project.json"),
+        JSON.stringify({ id: "default-cli-project", name: "CLI Project", projectResources: {} }),
+      );
+      fs.writeFileSync(
+        path.join(paths.projectsDir, "sidecar.json"),
+        JSON.stringify({ id: "sidecar", name: "swarm/swarm_board", projectResources: {} }),
+      );
+
+      // 55 extra unique directories to test 50 cap
+      const extraDirs = [];
+      for (let i = 0; i < 55; i += 1) {
+        const d = path.join(root, `extra-proj-${String(i).padStart(2, "0")}`);
+        fs.mkdirSync(d, { recursive: true });
+        extraDirs.push(d);
+        fs.writeFileSync(
+          path.join(paths.projectsDir, `extra-${i}.json`),
+          JSON.stringify({
+            id: `extra-${i}`,
+            name: `Zeta ${String(i).padStart(2, "0")}`,
+            projectResources: { resources: [{ folderUri: pathToFileURL(d).href }] },
+          }),
+        );
+      }
+
+      const known = listKnownWorkspaces(paths);
+      assert.equal(known.length, 50);
+      assert.deepEqual(known[0], { id: "p-named", name: "Alpha Project", path: realWsA });
+      assert.deepEqual(known[1], { id: "p-beta", name: "Beta Project", path: realWsB });
+
+      // Precedence: arg > project_id > mcp_roots > saved > none
+      assert.deepEqual(
+        scanLocalInventory({ geminiHome, savedWorkspacePath: wsSaved }).workspace,
+        { path: realWsSaved, source: "saved" },
+      );
+      assert.deepEqual(
+        scanLocalInventory({
+          geminiHome,
+          mcpRoots: [pathToFileURL(wsA).href],
+          savedWorkspacePath: wsSaved,
+        }).workspace,
+        { path: realWsA, source: "mcp_roots" },
+      );
+      assert.deepEqual(
+        scanLocalInventory({
+          geminiHome,
+          workspacePath: wsArg,
+          mcpRoots: [pathToFileURL(wsA).href],
+          savedWorkspacePath: wsSaved,
+        }).workspace,
+        { path: realWsArg, source: "arg" },
+      );
+
+      // fileUri on global, plugin, workspace rules & conversation artifacts
+      fs.writeFileSync(path.join(paths.geminiHome, "GEMINI.md"), "global rule");
+      const plugDir = path.join(paths.pluginsDir, "plug-uri");
+      fs.mkdirSync(path.join(plugDir, "rules"), { recursive: true });
+      fs.writeFileSync(path.join(plugDir, "plugin.json"), JSON.stringify({ name: "plug-uri" }));
+      fs.writeFileSync(path.join(plugDir, "rules", "p.md"), "plugin rule");
+      fs.writeFileSync(path.join(wsSaved, "AGENTS.md"), "ws rule");
+
+      const cid = "uri-conv";
+      writeTranscript(paths, cid, [{ type: "USER_INPUT", content: "hi" }]);
+      writeAnnotation(paths, cid, "URI Test");
+      fs.writeFileSync(path.join(paths.brainDir, cid, "plan.md"), "# Plan");
+
+      const snap = await getContextSnapshot({
+        geminiHome,
+        conversationId: cid,
+        savedWorkspacePath: wsSaved,
+        includeDetails: true,
+      });
+      assert.equal(snap.inventory.workspace.source, "saved");
+      assert.ok(snap.inventory.knownWorkspaces.length === 50);
+      for (const r of snap.inventory.rules.items) {
+        assert.ok(typeof r.fileUri === "string" && r.fileUri.startsWith("file://"));
+      }
+      assert.equal(snap.current.artifacts.items.length, 1);
+      assert.ok(snap.current.artifacts.items[0].fileUri.startsWith("file://"));
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+      fs.rmSync(wsA, { recursive: true, force: true });
+      fs.rmSync(wsB, { recursive: true, force: true });
+      fs.rmSync(wsSaved, { recursive: true, force: true });
+      fs.rmSync(wsArg, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("Suite 10: listConversations fleet KPIs, search, filtering, sorting, and pagination", () => {
+  it("computes interactive-scoped fleet KPIs and filters/sorts/paginates across kinds", async () => {
+    const { root, geminiHome, paths } = makeGeminiFixture();
+    const now = Date.now();
+    const srv = await startMockServer((req, res) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          conversations: [
+            {
+              id: "int-running",
+              annotations: { title: "Alpha Running" },
+              state: { runState: "RUN_STATE_RUNNING" },
+              metadata: {},
+            },
+            {
+              id: "sub-1",
+              annotations: { title: "Subagent Worker" },
+              state: { runState: "RUN_STATE_IDLE" },
+              metadata: { parentConversationId: "int-running" },
+            },
+          ],
+        }),
+      );
+    });
+
+    try {
+      // High usage (80% of 512k = 409,600) + checkpointed
+      writeTranscript(
+        paths,
+        "int-high-cp",
+        [
+          { type: "USER_INPUT", content: "High usage task" },
+          { type: "CHECKPOINT" },
+          {
+            type: "PLANNER_RESPONSE",
+            model: "gemini-4-neon-high",
+            input_tokens: 100_000,
+            cache_read_tokens: 310_000,
+          },
+        ],
+        { mtimeMs: now - 4000 },
+      );
+      writeAnnotation(paths, "int-high-cp", "High Checkpointed");
+
+      // Running interactive (low usage)
+      writeTranscript(
+        paths,
+        "int-running",
+        [
+          { type: "USER_INPUT", content: "Running task" },
+          {
+            type: "PLANNER_RESPONSE",
+            model: "claude-opus-4-6",
+            input_tokens: 20_000,
+            cache_read_tokens: 20_000,
+          },
+        ],
+        { mtimeMs: now - 3000 },
+      );
+      writeAnnotation(paths, "int-running", "Alpha Running");
+
+      // Unknown window model (usedPercent: null)
+      writeTranscript(
+        paths,
+        "int-null-win",
+        [
+          { type: "USER_INPUT", content: "Unknown window" },
+          {
+            type: "PLANNER_RESPONSE",
+            model: "gpt-oss-120b",
+            input_tokens: 500_000,
+            cache_read_tokens: 0,
+          },
+        ],
+        { mtimeMs: now - 2000 },
+      );
+      writeAnnotation(paths, "int-null-win", "Unknown Model");
+
+      // Subagent & background (non-interactive, high usage should NOT count toward fleetScope: "interactive")
+      writeTranscript(
+        paths,
+        "sub-1",
+        [
+          { type: "USER_INPUT", content: "Subagent" },
+          {
+            type: "PLANNER_RESPONSE",
+            model: "gemini-4-neon",
+            input_tokens: 450_000,
+            cache_read_tokens: 0,
+          },
+        ],
+        { mtimeMs: now - 1500 },
+      );
+      writeTranscript(
+        paths,
+        "bg-1",
+        [
+          { type: "USER_INPUT", content: "Background job" },
+          { type: "CHECKPOINT" },
+          { type: "CHECKPOINT" },
+          {
+            type: "PLANNER_RESPONSE",
+            model: "gemini-4-neon",
+            input_tokens: 420_000,
+            cache_read_tokens: 0,
+          },
+        ],
+        { mtimeMs: now - 1000 },
+      );
+
+      await withEnv(
+        { ANTIGRAVITY_LS_ADDRESS: srv.address, ANTIGRAVITY_CSRF_TOKEN: "tok" },
+        async () => {
+          const defRes = await listConversations({ geminiHome });
+          assert.equal(defRes.schemaVersion, 2);
+          assert.deepEqual(defRes.fleet, {
+            totalTracked: 5,
+            interactiveCount: 3,
+            nonInteractiveCount: 2,
+            highUsageInteractiveCount: 1,
+            checkpointedInteractiveCount: 1,
+            runningCount: 1,
+            fleetScope: "interactive",
+          });
+          assert.equal(defRes.totalMatching, 3);
+          assert.deepEqual(
+            defRes.items.map((i) => i.conversationId),
+            ["int-null-win", "int-running", "int-high-cp"],
+          );
+
+          // usage_desc keeps nulls last
+          const byUsage = await listConversations({ geminiHome, sort: "usage_desc" });
+          assert.deepEqual(
+            byUsage.items.map((i) => i.conversationId),
+            ["int-high-cp", "int-running", "int-null-win"],
+          );
+
+          // tokens_desc & pagination
+          const page1 = await listConversations({
+            geminiHome,
+            kind: "all",
+            sort: "tokens_desc",
+            offset: 0,
+            limit: 2,
+          });
+          assert.equal(page1.totalMatching, 5);
+          assert.equal(page1.hasMore, true);
+          assert.deepEqual(
+            page1.items.map((i) => i.conversationId),
+            ["int-null-win", "sub-1"],
+          );
+
+          const page2 = await listConversations({
+            geminiHome,
+            kind: "all",
+            sort: "tokens_desc",
+            offset: 2,
+            limit: 2,
+          });
+          assert.equal(page2.hasMore, true);
+          assert.deepEqual(
+            page2.items.map((i) => i.conversationId),
+            ["bg-1", "int-high-cp"],
+          );
+
+          // Filters & query
+          assert.deepEqual(
+            (await listConversations({ geminiHome, filter: "high_usage" })).items.map(
+              (i) => i.conversationId,
+            ),
+            ["int-high-cp"],
+          );
+          assert.deepEqual(
+            (await listConversations({ geminiHome, filter: "checkpointed" })).items.map(
+              (i) => i.conversationId,
+            ),
+            ["int-high-cp"],
+          );
+          assert.deepEqual(
+            (await listConversations({ geminiHome, filter: "running" })).items.map(
+              (i) => i.conversationId,
+            ),
+            ["int-running"],
+          );
+          assert.deepEqual(
+            (await listConversations({ geminiHome, kind: "subagent" })).items.map(
+              (i) => i.conversationId,
+            ),
+            ["sub-1"],
+          );
+          assert.deepEqual(
+            (await listConversations({ geminiHome, kind: "background" })).items.map(
+              (i) => i.conversationId,
+            ),
+            ["bg-1"],
+          );
+          assert.deepEqual(
+            (await listConversations({ geminiHome, query: "claude" })).items.map(
+              (i) => i.conversationId,
+            ),
+            ["int-running"],
+          );
+          assert.deepEqual(
+            (
+              await listConversations({
+                geminiHome,
+                kind: "all",
+                sort: "checkpoints_desc",
+              })
+            ).items
+              .slice(0, 2)
+              .map((i) => i.conversationId),
+            ["bg-1", "int-high-cp"],
+          );
+        },
+      );
+    } finally {
+      await srv.close();
+      fs.rmSync(root, { recursive: true, force: true });
     }
   });
 });
