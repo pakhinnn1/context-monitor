@@ -1,6 +1,6 @@
 {
   "name": "antigravity-context-monitor",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "Local MCP App plugin for Antigravity Desktop showing per-conversation context usage.",

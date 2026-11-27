@@ -10,11 +10,30 @@ import {
   RESOURCE_MIME_TYPE,
 } from "@modelcontextprotocol/ext-apps/server";
 import { z } from "zod";
-import { getContextSnapshot, validateWorkspaceDir } from "./analyzer.mjs";
+import {
+  getContextSnapshot,
+  listConversations,
+  validateWorkspaceDir,
+} from "./analyzer.mjs";
+import {
+  loadPreferences,
+  resolveDataDir,
+  savePreferences,
+} from "./preferences.mjs";
 
 const APP_URI = "ui://context-monitor/app.html";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 let cachedMcpRoots = null;
+const dataDir = resolveDataDir();
+let currentPreferences = loadPreferences(dataDir);
+
+function getPreferencesPayload() {
+  return {
+    workspacePath: currentPreferences.workspacePath,
+    includeSubagents: currentPreferences.includeSubagents,
+    persisted: currentPreferences.persisted,
+  };
+}
 
 function loadAppHtml() {
   const overridePath = process.env.CONTEXT_MONITOR_HTML;
@@ -101,7 +120,7 @@ function formatSummaryText(snapshot) {
 
 const server = new McpServer({
   name: "context-monitor",
-  version: "0.1.2",
+  version: "0.2.0",
 });
 
 server.server.setNotificationHandler(RootsListChangedNotificationSchema, () => {
@@ -187,13 +206,17 @@ registerAppTool(
   },
   async (args) => {
     const mcpRootsPromise = resolveMcpRoots(server, args);
+    const includeSubagents =
+      args?.includeSubagents ?? currentPreferences.includeSubagents;
     const snapshot = await getContextSnapshot({
       conversationId: args?.conversationId,
       workspacePath: args?.workspacePath,
-      includeSubagents: args?.includeSubagents ?? false,
+      savedWorkspacePath: currentPreferences.workspacePath,
+      includeSubagents,
       includeDetails: false,
       mcpRoots: mcpRootsPromise,
     });
+    snapshot.preferences = getPreferencesPayload();
     return {
       content: [
         {
@@ -232,14 +255,18 @@ registerAppTool(
   },
   async (args) => {
     const mcpRootsPromise = resolveMcpRoots(server, args);
+    const includeSubagents =
+      args?.includeSubagents ?? currentPreferences.includeSubagents;
     const snapshot = await getContextSnapshot({
       conversationId: args?.conversationId,
       workspacePath: args?.workspacePath,
-      includeSubagents: args?.includeSubagents ?? false,
+      savedWorkspacePath: currentPreferences.workspacePath,
+      includeSubagents,
       limit: args?.limit,
       includeDetails: true,
       mcpRoots: mcpRootsPromise,
     });
+    snapshot.preferences = getPreferencesPayload();
     return {
       content: [
         {
@@ -249,6 +276,106 @@ registerAppTool(
       ],
       structuredContent: snapshot,
     };
+  },
+);
+
+registerAppTool(
+  server,
+  "list_conversations",
+  {
+    title: "List Tracked Conversations",
+    description:
+      "App-only paginated fleet explorer returning interactive KPIs and matching conversations.",
+    inputSchema: {
+      query: z.string().optional(),
+      kind: z.enum(["interactive", "all", "subagent", "background"]).optional(),
+      filter: z.enum(["all", "high_usage", "checkpointed", "running"]).optional(),
+      sort: z
+        .enum(["recent", "usage_desc", "tokens_desc", "checkpoints_desc"])
+        .optional(),
+      offset: z.number().int().min(0).optional(),
+      limit: z.number().int().min(1).max(100).optional(),
+    },
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+    _meta: {
+      ui: {
+        visibility: ["app"],
+      },
+    },
+  },
+  async (args) => {
+    const res = await listConversations({
+      query: args?.query,
+      kind: args?.kind,
+      filter: args?.filter,
+      sort: args?.sort,
+      offset: args?.offset,
+      limit: args?.limit,
+    });
+    return {
+      content: [
+        {
+          type: "text",
+          text: `Fleet: ${res.fleet.interactiveCount} interactive / ${res.fleet.totalTracked} tracked (${res.items.length} of ${res.totalMatching} shown).`,
+        },
+      ],
+      structuredContent: res,
+    };
+  },
+);
+
+registerAppTool(
+  server,
+  "set_context_preferences",
+  {
+    title: "Save Context Monitor Preferences",
+    description:
+      "App-only tool to persist workspace selection and subagent visibility preferences.",
+    inputSchema: {
+      workspacePath: z.string().nullable().optional(),
+      includeSubagents: z.boolean().optional(),
+    },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+    _meta: {
+      ui: {
+        visibility: ["app"],
+      },
+    },
+  },
+  async (args) => {
+    try {
+      currentPreferences = savePreferences(dataDir, args ?? {}, currentPreferences);
+      const prefs = getPreferencesPayload();
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Preferences updated (persisted: ${prefs.persisted}, workspace: ${prefs.workspacePath || "auto"}, includeSubagents: ${prefs.includeSubagents}).`,
+          },
+        ],
+        structuredContent: prefs,
+      };
+    } catch (err) {
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: err instanceof Error ? err.message : String(err),
+          },
+        ],
+      };
+    }
   },
 );
 

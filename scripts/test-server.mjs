@@ -50,7 +50,7 @@ async function runLiveSmokeTests() {
 
   const client = new Client({
     name: "context-monitor-test",
-    version: "0.1.2",
+    version: "0.2.0",
   });
 
   await client.connect(transport);
@@ -60,6 +60,8 @@ async function runLiveSmokeTests() {
     const toolsRes = await client.listTools();
     const openTool = toolsRes.tools.find((t) => t.name === "open_context_monitor");
     const snapTool = toolsRes.tools.find((t) => t.name === "get_context_snapshot");
+    const listTool = toolsRes.tools.find((t) => t.name === "list_conversations");
+    const prefsTool = toolsRes.tools.find((t) => t.name === "set_context_preferences");
 
     assert.ok(openTool, "open_context_monitor tool missing");
     assert.equal(
@@ -98,6 +100,19 @@ async function runLiveSmokeTests() {
       "get_context_snapshot missing includeSubagents parameter",
     );
 
+    assert.ok(listTool, "list_conversations tool missing");
+    assert.deepEqual(
+      listTool._meta?.ui?.visibility,
+      ["app"],
+      "list_conversations must have visibility ['app']",
+    );
+    assert.ok(prefsTool, "set_context_preferences tool missing");
+    assert.deepEqual(
+      prefsTool._meta?.ui?.visibility,
+      ["app"],
+      "set_context_preferences must have visibility ['app']",
+    );
+
     // 2. Verify UI resource
     const resList = await client.listResources();
     const uiRes = resList.resources.find(
@@ -132,6 +147,10 @@ async function runLiveSmokeTests() {
     const snap = openRes.structuredContent;
     assert.ok(snap, "missing structuredContent");
     assert.equal(snap.schemaVersion, 2, "expected schemaVersion 2");
+    assert.ok(
+      snap.preferences && typeof snap.preferences.includeSubagents === "boolean",
+      "open_context_monitor must echo preferences",
+    );
 
     const payloadBytes = Buffer.byteLength(JSON.stringify(snap), "utf8");
     const fullResultBytes = Buffer.byteLength(JSON.stringify(openRes), "utf8");
@@ -175,6 +194,10 @@ async function runLiveSmokeTests() {
       const cpSnap = cpRes.structuredContent;
       assert.equal(cpSnap.schemaVersion, 2, "expected schemaVersion 2");
       assert.equal(cpSnap.current.conversationId, targetCid);
+      assert.ok(
+        cpSnap.preferences && typeof cpSnap.preferences.includeSubagents === "boolean",
+        "get_context_snapshot must echo preferences",
+      );
 
       const cpPayloadBytes = Buffer.byteLength(JSON.stringify(cpSnap), "utf8");
       const cpFullBytes = Buffer.byteLength(JSON.stringify(cpRes), "utf8");
@@ -200,6 +223,25 @@ async function runLiveSmokeTests() {
         );
       }
     }
+
+    // 5. Verify list_conversations on live local corpus under < 1 MiB
+    const listRes = await client.callTool({
+      name: "list_conversations",
+      arguments: { limit: 35 },
+    });
+    assert.ok(!listRes.isError, "list_conversations returned isError");
+    const listData = listRes.structuredContent;
+    assert.equal(listData.schemaVersion, 2);
+    assert.equal(listData.fleet?.fleetScope, "interactive");
+    assert.ok(Array.isArray(listData.items), "list_conversations items must be an array");
+    const listBytes = Buffer.byteLength(JSON.stringify(listRes), "utf8");
+    assert.ok(
+      listBytes < 1024 * 1024,
+      `list_conversations CallToolResult exceeds 1 MiB (${listBytes} bytes)`,
+    );
+    console.log(
+      `Verified list_conversations: ${listData.fleet.interactiveCount} interactive / ${listData.fleet.totalTracked} tracked (${(listBytes / 1024).toFixed(1)} KiB)`,
+    );
 
     console.log("--- Sample tool text output ---");
     console.log(openRes.content[0].text);
@@ -241,7 +283,7 @@ async function runMcpRootsTests() {
   const client = new Client(
     {
       name: "context-monitor-roots-test",
-      version: "0.1.2",
+      version: "0.2.0",
     },
     {
       capabilities: {
@@ -322,6 +364,177 @@ async function runMcpRootsTests() {
   }
 }
 
+async function runPreferencesAndFleetServerTests() {
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ctx-mon-prefs-"));
+  const geminiHome = path.join(tmpRoot, ".gemini");
+  const dataDir = path.join(tmpRoot, "plugin-data");
+  const wsDir = path.join(tmpRoot, "sample-workspace");
+  const brainDir = path.join(geminiHome, "antigravity", "brain");
+  const annDir = path.join(geminiHome, "antigravity", "annotations");
+  const projDir = path.join(geminiHome, "config", "projects");
+
+  fs.mkdirSync(brainDir, { recursive: true });
+  fs.mkdirSync(annDir, { recursive: true });
+  fs.mkdirSync(projDir, { recursive: true });
+  fs.mkdirSync(wsDir, { recursive: true });
+  fs.writeFileSync(path.join(wsDir, "AGENTS.md"), "# Workspace rules\n", "utf8");
+  const realWsDir = fs.realpathSync(wsDir);
+
+  fs.writeFileSync(
+    path.join(projDir, "sample-proj.json"),
+    JSON.stringify({
+      id: "sample-proj",
+      name: "Sample Workspace",
+      projectResources: { resources: [{ gitFolder: { folderUri: pathToFileURL(wsDir).href } }] },
+    }),
+  );
+
+  const writeThread = (cid, rows, mtimeMs, title = null) => {
+    const logs = path.join(brainDir, cid, ".system_generated", "logs");
+    fs.mkdirSync(logs, { recursive: true });
+    const tp = path.join(logs, "transcript.jsonl");
+    fs.writeFileSync(tp, `${rows.map((r) => JSON.stringify(r)).join("\n")}\n`, "utf8");
+    fs.utimesSync(tp, mtimeMs / 1000, mtimeMs / 1000);
+    if (title) {
+      fs.writeFileSync(path.join(annDir, `${cid}.pbtxt`), `title: "${title}"\n`, "utf8");
+    }
+  };
+
+  const now = Date.now();
+  writeThread(
+    "inter-1",
+    [
+      { type: "USER_INPUT", content: "High usage" },
+      { type: "CHECKPOINT" },
+      { type: "PLANNER_RESPONSE", model: "gemini-4-neon", input_tokens: 400_000, cache_read_tokens: 0 },
+    ],
+    now - 2000,
+    "Interactive One",
+  );
+  writeThread(
+    "bg-1",
+    [
+      { type: "USER_INPUT", content: "Bg task" },
+      { type: "PLANNER_RESPONSE", model: "gemini-4-neon", input_tokens: 10_000, cache_read_tokens: 0 },
+    ],
+    now - 1000,
+    null,
+  );
+
+  const connectWithArgs = async (args) => {
+    const transport = new StdioClientTransport({
+      command: "node",
+      args,
+      env: {
+        ...process.env,
+        CONTEXT_MONITOR_GEMINI_HOME: geminiHome,
+        ANTIGRAVITY_LS_ADDRESS: "",
+        ANTIGRAVITY_CSRF_TOKEN: "",
+      },
+    });
+    const client = new Client({ name: "context-monitor-prefs-test", version: "0.2.0" });
+    await client.connect(transport);
+    return client;
+  };
+
+  try {
+    // 1. Persist preferences with --data-dir and test list_conversations
+    const c1 = await connectWithArgs([serverEntry, `--data-dir=${dataDir}`]);
+    try {
+      const setRes = await c1.callTool({
+        name: "set_context_preferences",
+        arguments: { workspacePath: wsDir, includeSubagents: true },
+      });
+      assert.ok(!setRes.isError, "set_context_preferences failed");
+      assert.deepEqual(setRes.structuredContent, {
+        workspacePath: realWsDir,
+        includeSubagents: true,
+        persisted: true,
+      });
+
+      const badRes = await c1.callTool({
+        name: "set_context_preferences",
+        arguments: { workspacePath: "/" },
+      });
+      assert.equal(badRes.isError, true, "expected isError on invalid workspacePath '/'");
+
+      const openRes = await c1.callTool({ name: "open_context_monitor", arguments: {} });
+      assert.deepEqual(openRes.structuredContent.inventory.workspace, {
+        path: realWsDir,
+        source: "saved",
+      });
+      assert.equal(openRes.structuredContent.preferences.includeSubagents, true);
+      assert.equal(openRes.structuredContent.conversations.length, 2);
+      assert.equal(openRes.structuredContent.inventory.knownWorkspaces.length, 1);
+
+      const listRes = await c1.callTool({
+        name: "list_conversations",
+        arguments: { kind: "all", filter: "all", sort: "tokens_desc", offset: 0, limit: 1 },
+      });
+      assert.equal(listRes.structuredContent.totalMatching, 2);
+      assert.equal(listRes.structuredContent.hasMore, true);
+      assert.equal(listRes.structuredContent.items[0].conversationId, "inter-1");
+      assert.equal(listRes.structuredContent.fleet.highUsageInteractiveCount, 1);
+      assert.ok(Buffer.byteLength(JSON.stringify(listRes), "utf8") < 1024 * 1024);
+    } finally {
+      await c1.close();
+    }
+
+    // 2. Simulate restart with same --data-dir -> saved prefs survive, then clear to Auto
+    const c2 = await connectWithArgs([serverEntry, `--data-dir=${dataDir}`]);
+    try {
+      const snapRes = await c2.callTool({ name: "get_context_snapshot", arguments: {} });
+      assert.deepEqual(snapRes.structuredContent.preferences, {
+        workspacePath: realWsDir,
+        includeSubagents: true,
+        persisted: true,
+      });
+      assert.deepEqual(snapRes.structuredContent.inventory.workspace, {
+        path: realWsDir,
+        source: "saved",
+      });
+
+      const clearRes = await c2.callTool({
+        name: "set_context_preferences",
+        arguments: { workspacePath: null, includeSubagents: false },
+      });
+      assert.deepEqual(clearRes.structuredContent, {
+        workspacePath: null,
+        includeSubagents: false,
+        persisted: true,
+      });
+
+      const snapCleared = await c2.callTool({ name: "get_context_snapshot", arguments: {} });
+      assert.deepEqual(snapCleared.structuredContent.inventory.workspace, {
+        path: null,
+        source: "none",
+      });
+    } finally {
+      await c2.close();
+    }
+
+    // 3. Unexpanded ${PLUGIN_DATA} falls back to in-memory-only mode
+    const c3 = await connectWithArgs([serverEntry, "--data-dir=${PLUGIN_DATA}"]);
+    try {
+      const memRes = await c3.callTool({
+        name: "set_context_preferences",
+        arguments: { includeSubagents: true },
+      });
+      assert.ok(!memRes.isError);
+      assert.equal(memRes.structuredContent.persisted, false);
+      assert.equal(memRes.structuredContent.includeSubagents, true);
+      assert.equal(fs.existsSync(path.join(process.cwd(), "${PLUGIN_DATA}")), false);
+    } finally {
+      await c3.close();
+    }
+
+    console.log("Verified preferences persistence across restart, fleet list_conversations, and unexpanded ${PLUGIN_DATA} fallback!");
+  } finally {
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  }
+}
+
 await runLiveSmokeTests();
 await runMcpRootsTests();
+await runPreferencesAndFleetServerTests();
 console.log("All MCP server checks passed!");

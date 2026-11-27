@@ -3,30 +3,110 @@ import {
   applyDocumentTheme,
   applyHostStyleVariables,
 } from "@modelcontextprotocol/ext-apps";
+import { z } from "zod";
+import {
+  computeTrajectoryGeometry,
+  formatTrajectoryReadout,
+  renderTrajectoryChart,
+} from "./charts.js";
+import {
+  escapeHtml,
+  formatAttachedContextSummary,
+  formatExactNumber,
+  formatPercent,
+  formatRelativeTime,
+  formatServiceStatus,
+  formatSkillsScope,
+  formatTokens,
+  formatWorkspaceLabel,
+  shortenPath,
+} from "./format.js";
+import {
+  renderFleetKpis,
+  renderRailFooter,
+  renderRailList,
+  renderRailShell,
+} from "./rail.js";
+
+const ToggleAuxPaneResultSchema = z
+  .object({ isError: z.boolean().optional() })
+  .passthrough();
 
 const rootEl = document.getElementById("app");
 const statusLiveEl = document.getElementById("status-live");
-const app = new App({ name: "Context Monitor", version: "0.1.2" }, {});
+const app = new App({ name: "Context Monitor", version: "0.2.0" }, {});
 
 const hoverFineQuery = window.matchMedia?.("(hover: hover) and (pointer: fine)");
 
 let currentSnapshot = null;
 let selectedConversationId = null;
+let selectedWorkspacePath = null;
+let includeSubagents = false;
+let attachedConversationId = null;
+let auxPaneOpenUnsupported = false;
+let isConnected = false;
+let isWideMode = false;
+let railLoaded = false;
+
 let isRefreshing = false;
 let lastError = null;
-let openDrawers = new Set();
+const userToggledDrawers = new Map();
 let pollTimer = null;
 let refreshDoneTimer = null;
+let searchDebounceTimer = null;
 let mountedStructureKey = null;
 let lastRenderedFingerprint = null;
 let pendingStructuralRender = false;
 let highlightedSegId = null;
 
+let snapshotSeq = 0;
+let railSeq = 0;
+let inFlightCalls = 0;
+const callQueue = [];
+
+let activeTrajectoryCoords = null;
 let openTipCount = 0;
 let lastTipClosedAt = 0;
-
-// Track toggletip triggers whose aria-expanded we manage
 const managedTriggers = new WeakSet();
+
+const railState = {
+  query: "",
+  kind: "interactive",
+  filter: "all",
+  sort: "recent",
+  offset: 0,
+  limit: 35,
+  items: [],
+  fleet: null,
+  totalMatching: 0,
+  hasMore: false,
+  loading: false,
+  loadingMore: false,
+  error: null,
+};
+
+function enqueueToolCall(fn) {
+  return new Promise((resolve, reject) => {
+    const run = async () => {
+      inFlightCalls += 1;
+      try {
+        resolve(await fn());
+      } catch (err) {
+        reject(err);
+      } finally {
+        inFlightCalls -= 1;
+        const next = callQueue.shift();
+        if (next) next();
+      }
+    };
+
+    if (inFlightCalls < 2) {
+      void run();
+    } else {
+      callQueue.push(() => void run());
+    }
+  });
+}
 
 function announceStatus(message) {
   if (!statusLiveEl || !message) return;
@@ -36,8 +116,35 @@ function announceStatus(message) {
   });
 }
 
+function getHostCaps() {
+  return isConnected ? app.getHostCapabilities() : null;
+}
+
+function canAttachModelContext() {
+  return Boolean(getHostCaps()?.updateModelContext);
+}
+
+function canOpenAuxFile() {
+  const caps = getHostCaps();
+  return (
+    Boolean(caps?.updateModelContext || caps?.message) && !auxPaneOpenUnsupported
+  );
+}
+
+function isDrawerOpen(drawerId) {
+  if (userToggledDrawers.has(drawerId)) {
+    return userToggledDrawers.get(drawerId);
+  }
+  if (
+    isWideMode &&
+    (drawerId === "trajectory" || drawerId === "top-tools" || drawerId === "artifacts")
+  ) {
+    return true;
+  }
+  return false;
+}
+
 function setupHintFallbackAndAria() {
-  // Fallback where popover="hint" is unsupported (falls back to "manual" natively)
   let needsHintFallback = false;
   if (Object.hasOwn(HTMLElement.prototype, "popover")) {
     const probe = document.createElement("div");
@@ -73,13 +180,18 @@ function setupHintFallbackAndAria() {
     true,
   );
 
-  // Sync aria-expanded + instant-swap counters from popover toggle events (capture)
   document.addEventListener(
     "toggle",
     (event) => {
       const target = event.target;
-      if (!(target instanceof HTMLElement) || !target.id) return;
-      if (!target.hasAttribute("popover")) return;
+      if (!(target instanceof HTMLElement)) return;
+
+      if (target instanceof HTMLDetailsElement && target.dataset.drawerId) {
+        userToggledDrawers.set(target.dataset.drawerId, target.open);
+        return;
+      }
+
+      if (!target.id || !target.hasAttribute("popover")) return;
 
       const isOpen = event.newState === "open";
       const triggers = document.querySelectorAll(
@@ -150,53 +262,6 @@ async function ensureInterestPolyfill() {
   }
 }
 
-function formatTokens(n) {
-  if (n === null || n === undefined || Number.isNaN(n)) return "—";
-  const val = Number(n);
-  if (val >= 1_000_000) {
-    const m = val / 1_000_000;
-    return `${Number.isInteger(m) ? m : m.toFixed(1).replace(/\.0$/, "")}M`;
-  }
-  if (val >= 1_000) {
-    const k = val / 1_000;
-    return `${k >= 100 ? Math.round(k) : k.toFixed(1).replace(/\.0$/, "")}k`;
-  }
-  return String(Math.round(val));
-}
-
-function formatExactNumber(n) {
-  if (n === null || n === undefined || Number.isNaN(n)) return "—";
-  return Number(n).toLocaleString("en-US");
-}
-
-function formatPercent(pct, digits = 1) {
-  if (pct === null || pct === undefined || Number.isNaN(pct)) return "—";
-  return `${Number(pct).toFixed(digits)}%`;
-}
-
-function formatRelativeTime(iso) {
-  if (!iso) return "";
-  const ms = Date.now() - Date.parse(iso);
-  if (Number.isNaN(ms)) return "";
-  const sec = Math.max(0, Math.floor(ms / 1000));
-  if (sec < 60) return `${sec}s ago`;
-  const min = Math.floor(sec / 60);
-  if (min < 60) return `${min}m ago`;
-  const hr = Math.floor(min / 60);
-  if (hr < 24) return `${hr}h ago`;
-  const days = Math.floor(hr / 24);
-  return `${days}d ago`;
-}
-
-function escapeHtml(str) {
-  return String(str ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
-
 function applyThemeFromHost(ctx) {
   if (!ctx) return;
   if (ctx.theme) {
@@ -209,31 +274,27 @@ function applyThemeFromHost(ctx) {
   }
 }
 
-function captureDrawerStates() {
-  const next = new Set();
-  const drawers = rootEl.querySelectorAll("details[data-drawer-id]");
-  if (drawers.length === 0) return;
-  for (const el of drawers) {
-    if (el.open) next.add(el.dataset.drawerId);
-  }
-  openDrawers = next;
-}
-
-function formatSkillsScope(byScope) {
-  if (!byScope) return "";
-  const base = `${byScope.plugin} plugin, ${byScope.global} global, ${byScope.builtin} builtin`;
-  return byScope.workspace > 0 ? `${base}, ${byScope.workspace} workspace` : base;
-}
-
 function computeSnapshotFingerprint(snapshot) {
   if (!snapshot) return "";
-  const { current, conversations = [], inventory } = snapshot;
+  const { current, conversations = [], inventory, serviceStatus, preferences } = snapshot;
+  const trajPoints = current?.trajectory?.points || [];
+  const lastTraj = trajPoints[trajPoints.length - 1];
   return JSON.stringify({
     selectedConversationId: snapshot.selectedConversationId || null,
+    canAttach: canAttachModelContext(),
+    canOpenFile: canOpenAuxFile(),
+    attachedConversationId,
+    isWideMode,
+    includeSubagents,
+    selectedWorkspacePath,
+    serviceStatus,
+    preferences,
     current: current
       ? {
           conversationId: current.conversationId,
           title: current.title,
+          kind: current.kind,
+          runState: current.runState,
           lastUpdated: current.lastUpdated,
           hasUsageData: current.hasUsageData,
           modelId: current.model?.id,
@@ -245,6 +306,22 @@ function computeSnapshotFingerprint(snapshot) {
             percent: s.percent,
             colorKey: s.colorKey,
           })),
+          trajSummary: current.trajectory
+            ? [
+                trajPoints.length,
+                current.trajectory.totalTurnCount,
+                lastTraj?.turn,
+                lastTraj?.activeTokens,
+              ]
+            : null,
+          topTools: (current.topTools || []).map((t) => [t.name, t.calls, t.estTokens]),
+          artifacts: current.artifacts
+            ? [
+                current.artifacts.count,
+                current.artifacts.totalEstTokens,
+                current.artifacts.items.map((a) => [a.name, a.mtimeMs, a.userFacing]),
+              ]
+            : null,
         }
       : null,
     conversations: conversations.map((c) => ({
@@ -255,6 +332,8 @@ function computeSnapshotFingerprint(snapshot) {
     })),
     inventory: inventory
       ? {
+          workspace: inventory.workspace,
+          knownWorkspaces: (inventory.knownWorkspaces || []).map((w) => w.path),
           mcp: inventory.mcp?.servers?.map((s) => [
             s.name,
             s.active,
@@ -262,7 +341,12 @@ function computeSnapshotFingerprint(snapshot) {
             s.estSchemaTokens,
             s.estInstructionTokens,
           ]),
-          rules: inventory.rules?.items?.map((r) => [r.name, r.scope, r.estTokens]),
+          rules: inventory.rules?.items?.map((r) => [
+            r.name,
+            r.scope,
+            r.estTokens,
+            r.overPerFileCap,
+          ]),
           skills: [
             inventory.skills?.count,
             inventory.skills?.estIndexTokens,
@@ -276,9 +360,18 @@ function computeSnapshotFingerprint(snapshot) {
 function computeStructureKey(snapshot, error) {
   if (!snapshot) return "empty";
   const { current, conversations = [], inventory } = snapshot;
+  const trajPoints = current?.trajectory?.points || [];
+  const lastTraj = trajPoints[trajPoints.length - 1];
   return JSON.stringify({
     hasError: Boolean(error),
+    canAttach: canAttachModelContext(),
+    canOpenFile: canOpenAuxFile(),
+    isAttached: Boolean(
+      attachedConversationId && attachedConversationId === current?.conversationId,
+    ),
+    isWideMode,
     conversationId: current?.conversationId || null,
+    kind: current?.kind || null,
     hasUsageData: Boolean(current?.hasUsageData),
     hasWindow:
       current?.model?.contextWindow !== null &&
@@ -287,17 +380,33 @@ function computeStructureKey(snapshot, error) {
     segments: (current?.segments || [])
       .filter((s) => s.tokens > 0)
       .map((s) => s.id),
-    allSegments: (current?.segments || []).map((s) => s.id),
+    trajKey: current?.trajectory
+      ? [trajPoints.length, lastTraj?.turn, lastTraj?.activeTokens]
+      : "none",
+    topToolNames: (current?.topTools || []).map((t) => t.name),
+    artifactNames: (current?.artifacts?.items || []).map((a) => a.name),
     convIds: conversations.map((c) => c.conversationId),
+    workspacePath: inventory?.workspace?.path || null,
+    workspaceSource: inventory?.workspace?.source || "none",
+    knownWsPaths: (inventory?.knownWorkspaces || []).map((w) => w.path),
     mcpServers: (inventory?.mcp?.servers || []).map((s) => [s.name, s.active]),
-    ruleNames: (inventory?.rules?.items || []).map((r) => r.name),
+    ruleNames: (inventory?.rules?.items || []).map((r) => [r.name, r.overPerFileCap]),
     hasSkills: Boolean(inventory?.skills),
   });
 }
 
 function isUserInteracting() {
   const active = document.activeElement;
-  if (active && active.id === "thread-select") return true;
+  if (
+    active &&
+    (active.id === "thread-select" ||
+      active.id === "workspace-select" ||
+      active.id === "rail-search" ||
+      active.id === "rail-sort" ||
+      active.id === "rail-kind")
+  ) {
+    return true;
+  }
   if (
     rootEl.querySelector("[popover]:is(:popover-open, .\\:popover-open)") ||
     document.querySelector("[popover]:is(:popover-open, .\\:popover-open)")
@@ -383,8 +492,25 @@ function setHighlight(segId) {
   }
 }
 
+function updateTrajectoryScrub(idx) {
+  if (!activeTrajectoryCoords || activeTrajectoryCoords.length === 0) return;
+  const clamped = Math.max(0, Math.min(activeTrajectoryCoords.length - 1, idx));
+  const target = activeTrajectoryCoords[clamped];
+  const readoutEl = rootEl.querySelector('[data-slot="traj-readout"]');
+  const dotEl = rootEl.querySelector('[data-slot="traj-active-dot"]');
+  if (readoutEl) readoutEl.textContent = formatTrajectoryReadout(target.pt);
+  if (dotEl) {
+    dotEl.setAttribute("cx", target.x.toFixed(1));
+    dotEl.setAttribute("cy", target.yActive.toFixed(1));
+  }
+}
+
 function renderChevronSvg() {
   return `<svg class="drawer-chevron" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6l4 4 4-4"/></svg>`;
+}
+
+function renderOpenFileIcon() {
+  return `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.5 2.5h4v4"/><path d="M13.5 2.5L7 9"/><path d="M6.5 3.5H3.5a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1v-3"/></svg>`;
 }
 
 function renderRow({
@@ -438,6 +564,67 @@ function renderMcpGroup(heading, servers, { active = false } = {}) {
   `;
 }
 
+function renderTopToolsContent(topTools) {
+  if (!topTools || topTools.length === 0) {
+    return `<div class="sub-empty">No post-anchor tool calls attributed in this window.</div>`;
+  }
+  const maxShare = Math.max(...topTools.map((t) => t.sharePercent || 0), 1);
+  return `
+    <ul class="tool-list" role="list">
+      ${topTools
+        .map((t) => {
+          const width = Math.max(4, Math.min(100, ((t.sharePercent || 0) / maxShare) * 100));
+          return `
+            <li class="tool-row">
+              <div class="tool-row-top">
+                <span class="tool-name">${escapeHtml(t.name)}</span>
+                <span class="tool-meta" data-slot="tool-${escapeHtml(t.name)}">${t.calls}x · ~${escapeHtml(formatTokens(t.estTokens))} (${escapeHtml(formatPercent(t.sharePercent))})</span>
+              </div>
+              <span class="tool-bar-track" aria-hidden="true">
+                <span class="tool-bar-fill" style="width:${width.toFixed(1)}%"></span>
+              </span>
+            </li>
+          `;
+        })
+        .join("")}
+    </ul>
+  `;
+}
+
+function renderArtifactsContent(artifacts) {
+  if (!artifacts || !artifacts.items || artifacts.items.length === 0) {
+    return `<div class="sub-empty">No markdown artifacts found for this thread.</div>`;
+  }
+  const allowOpen = canOpenAuxFile();
+  return `
+    <ul class="sub-list" role="list">
+      ${artifacts.items
+        .map((a) => {
+          const badge = a.userFacing
+            ? `<span class="badge badge-accent">user-facing</span>`
+            : "";
+          const openBtn =
+            allowOpen && a.fileUri
+              ? `<button type="button" class="open-file-btn" data-open-file-uri="${escapeHtml(a.fileUri)}" title="Open ${escapeHtml(a.name)} in side pane" aria-label="Open ${escapeHtml(a.name)} in side pane">${renderOpenFileIcon()}</button>`
+              : "";
+          const summary = a.summary
+            ? `<span class="sub-row-note">${escapeHtml(a.summary)}</span>`
+            : "";
+          return `
+            <li class="sub-row">
+              <span class="sub-row-name">${escapeHtml(a.name)}</span>
+              ${badge}
+              <span class="sub-row-meta">~${escapeHtml(formatTokens(a.estTokens))}</span>
+              ${openBtn}
+              ${summary}
+            </li>
+          `;
+        })
+        .join("")}
+    </ul>
+  `;
+}
+
 function patchRelativeTimeOnly(snapshot) {
   const updatedEl = rootEl.querySelector('[data-slot="updated-rel"]');
   if (updatedEl && snapshot?.current) {
@@ -462,10 +649,32 @@ function patchRelativeTimeOnly(snapshot) {
   }
 }
 
+function syncRailSelectionHighlight() {
+  const railList = document.getElementById("rail-list");
+  if (!railList) return;
+  for (const btn of railList.querySelectorAll(".rail-item[data-conv-id]")) {
+    btn.setAttribute(
+      "aria-current",
+      btn.dataset.convId === selectedConversationId ? "true" : "false",
+    );
+  }
+}
+
 function patchInPlace(snapshot) {
-  const { current, conversations = [], inventory } = snapshot;
+  const { current, conversations = [], inventory, serviceStatus } = snapshot;
   const m = computeMetrics(snapshot);
-  const { exact, model, hasWindow, usedHeadline, fractionText, denom, freePct, mcpInfo, mcpEst, mcpHeaderCount } = m;
+  const {
+    exact,
+    model,
+    hasWindow,
+    usedHeadline,
+    fractionText,
+    denom,
+    freePct,
+    mcpInfo,
+    mcpEst,
+    mcpHeaderCount,
+  } = m;
 
   const setSlot = (name, value) => {
     const el = rootEl.querySelector(`[data-slot="${CSS.escape(name)}"]`);
@@ -488,7 +697,9 @@ function patchInPlace(snapshot) {
   }
 
   for (const seg of current?.segments || []) {
-    const barEl = rootEl.querySelector(`.bar-segment[data-seg-id="${CSS.escape(seg.id)}"]`);
+    const barEl = rootEl.querySelector(
+      `.bar-segment[data-seg-id="${CSS.escape(seg.id)}"]`,
+    );
     if (barEl && seg.tokens > 0 && denom > 0) {
       const widthPct = Math.max(0.6, (seg.tokens / denom) * 100);
       barEl.style.width = `${widthPct.toFixed(2)}%`;
@@ -530,13 +741,24 @@ function patchInPlace(snapshot) {
     setSlot("kv-uncached", formatExactNumber(exact.inputTokens));
     setSlot("kv-last-out", formatExactNumber(exact.lastOutputTokens));
     setSlot("kv-total-out", formatExactNumber(exact.totalOutputTokens));
+    setSlot("kv-cum-input", formatExactNumber(exact.cumulativeInputTokens));
+    setSlot("kv-cum-cache", formatExactNumber(exact.cumulativeCacheReadTokens));
+    setSlot("kv-cache-inv", String(exact.cacheInvalidationCount ?? 0));
     setSlot("kv-compactions", String(exact.checkpointCount));
     setSlot("kv-model", model?.id || "—");
+    setSlot("kv-service", formatServiceStatus(serviceStatus));
     setSlot(
       "updated-rel",
       formatRelativeTime(current.lastUpdated) || current.lastUpdated || "—",
     );
     setSlot("exact-turns", `${exact.turnCount} turns`);
+  }
+
+  for (const t of current?.topTools || []) {
+    setSlot(
+      `tool-${t.name}`,
+      `${t.calls}x · ~${formatTokens(t.estTokens)} (${formatPercent(t.sharePercent)})`,
+    );
   }
 
   if (mcpInfo) {
@@ -545,7 +767,10 @@ function patchInPlace(snapshot) {
     for (const srv of mcpInfo.servers || []) {
       const totalEst = formatTokens(srv.estSchemaTokens + srv.estInstructionTokens);
       const instrNote = srv.hasInstructions ? " · instructions" : "";
-      setSlot(`mcp-srv-${srv.name}`, `${srv.toolCount} tools · ~${totalEst}${instrNote}`);
+      setSlot(
+        `mcp-srv-${srv.name}`,
+        `${srv.toolCount} tools · ~${totalEst}${instrNote}`,
+      );
     }
   }
 
@@ -594,6 +819,7 @@ function patchInPlace(snapshot) {
     }
   }
 
+  syncRailSelectionHighlight();
   lastRenderedFingerprint = computeSnapshotFingerprint(snapshot);
 }
 
@@ -609,20 +835,44 @@ function updateRefreshButtonState({ spinning = false, refreshed = false } = {}) 
   }
 }
 
-function render() {
-  captureDrawerStates();
+function renderWorkspacePicker(inventory) {
+  const known = inventory?.knownWorkspaces || [];
+  const ws = inventory?.workspace || { path: null, source: "none" };
+  const activeSelection = selectedWorkspacePath || (ws.source === "saved" || ws.source === "arg" ? ws.path : "");
 
-  if (!currentSnapshot) {
-    rootEl.removeAttribute("aria-busy");
-    if (lastError) {
-      mountedStructureKey = "error";
-      rootEl.innerHTML = `<div class="error-banner" role="alert">${escapeHtml(lastError)}</div>`;
-    }
-    return;
+  const knownPaths = new Set(known.map((k) => k.path));
+  const options = [
+    `<option value=""${!activeSelection ? " selected" : ""}>Workspace: Auto</option>`,
+    ...known.map((w) => {
+      const sel = activeSelection === w.path ? " selected" : "";
+      const label = `${w.name} (${shortenPath(w.path)})`;
+      return `<option value="${escapeHtml(w.path)}"${sel}>${escapeHtml(label)}</option>`;
+    }),
+  ];
+  if (activeSelection && !knownPaths.has(activeSelection)) {
+    options.push(
+      `<option value="${escapeHtml(activeSelection)}" selected>${escapeHtml(formatWorkspaceLabel(activeSelection, known))} (${escapeHtml(shortenPath(activeSelection))})</option>`,
+    );
   }
 
-  rootEl.removeAttribute("aria-busy");
-  const { current, conversations = [], inventory } = currentSnapshot;
+  const sourceBadge =
+    ws.path && ws.source && ws.source !== "none"
+      ? `<span class="ws-source" title="${escapeHtml(ws.path)}">${escapeHtml(ws.source)}</span>`
+      : "";
+
+  return `
+    <div class="ws-picker">
+      <label for="workspace-select" class="sr-only">Active workspace</label>
+      <select id="workspace-select" class="ws-select" title="${escapeHtml(ws.path || "Automatic workspace resolution")}">
+        ${options.join("")}
+      </select>
+      ${sourceBadge}
+    </div>
+  `;
+}
+
+function buildInspectorHtml() {
+  const { current, conversations = [], inventory, serviceStatus } = currentSnapshot;
   const m = computeMetrics(currentSnapshot);
   const {
     exact,
@@ -636,13 +886,6 @@ function render() {
     mcpEst,
     mcpHeaderCount,
   } = m;
-
-  // Save focused control ID inside rootEl before rebuild
-  const activeEl = document.activeElement;
-  const restoreFocusId =
-    activeEl && activeEl instanceof HTMLElement && rootEl.contains(activeEl) && activeEl.id
-      ? activeEl.id
-      : null;
 
   const barSegments = [];
   if (current?.hasUsageData && exact.activeTokens > 0) {
@@ -661,7 +904,9 @@ function render() {
       const pctSuffix =
         conv.usedPercent !== null ? ` (${Math.round(conv.usedPercent)}%)` : "";
       const rel = formatRelativeTime(conv.lastUpdated);
-      const label = `${conv.title}${pctSuffix}${rel ? ` · ${rel}` : ""}`;
+      const kindPrefix =
+        conv.kind && conv.kind !== "interactive" ? `[${conv.kind}] ` : "";
+      const label = `${kindPrefix}${conv.title}${pctSuffix}${rel ? ` · ${rel}` : ""}`;
       return `<option value="${escapeHtml(conv.conversationId)}"${selected}>${escapeHtml(label)}</option>`;
     })
     .join("");
@@ -756,7 +1001,6 @@ function render() {
     );
   }
 
-  // Grouped MCP drawer (Configured vs Cached on disk)
   const allMcpServers = mcpInfo?.servers || [];
   const configuredServers = allMcpServers.filter((s) => s.active);
   const cachedServers = allMcpServers.filter((s) => !s.active);
@@ -765,18 +1009,32 @@ function render() {
       ? `${renderMcpGroup("Configured", configuredServers, { active: true })}${renderMcpGroup("Cached on disk", cachedServers)}`
       : '<div class="sub-row"><span>No local MCP schemas found.</span></div>';
 
+  const allowOpen = canOpenAuxFile();
+  const wsSummaryLine = inventory?.workspace?.path
+    ? `<div class="ws-active-note">Workspace: <span class="ws-active-path">${escapeHtml(inventory.workspace.path)}</span> (${escapeHtml(inventory.workspace.source)})</div>`
+    : `<div class="ws-active-note">Workspace: Auto (none detected — pick a workspace above to scan project rules)</div>`;
+
   const ruleListHtml =
     rulesInfo?.items?.length > 0
       ? `<ul class="sub-list" role="list">${rulesInfo.items
-          .map(
-            (r) => `
-          <li class="sub-row">
-            <span class="sub-row-name">${escapeHtml(r.name)}</span>
-            <span class="sub-row-meta" data-slot="rule-${escapeHtml(r.name)}">${escapeHtml(r.scope)} · ~${escapeHtml(formatTokens(r.estTokens))}</span>
-          </li>`,
-          )
+          .map((r) => {
+            const capBadge = r.overPerFileCap
+              ? `<span class="badge badge-warn" title="Exceeds 24 KB per-file cap">&gt; 24 KB</span>`
+              : "";
+            const openBtn =
+              allowOpen && r.fileUri
+                ? `<button type="button" class="open-file-btn" data-open-file-uri="${escapeHtml(r.fileUri)}" title="Open ${escapeHtml(r.name)} in side pane" aria-label="Open ${escapeHtml(r.name)} in side pane">${renderOpenFileIcon()}</button>`
+                : "";
+            return `
+              <li class="sub-row">
+                <span class="sub-row-name">${escapeHtml(r.name)}</span>
+                ${capBadge}
+                <span class="sub-row-meta" data-slot="rule-${escapeHtml(r.name)}">${escapeHtml(r.scope)} · ~${escapeHtml(formatTokens(r.estTokens))}</span>
+                ${openBtn}
+              </li>`;
+          })
           .join("")}</ul>`
-      : '<div class="sub-row"><span>No global or plugin rules found.</span></div>';
+      : '<div class="sub-row"><span>No global, plugin, or workspace rules found.</span></div>';
 
   const skillsRowHtml = skillsInfo
     ? `<div class="drawer-group">
@@ -793,6 +1051,9 @@ function render() {
     : "";
 
   const metaParts = [];
+  if (current?.kind && current.kind !== "interactive") {
+    metaParts.push(`<span class="badge badge-muted">${escapeHtml(current.kind)}</span>`);
+  }
   if (model?.displayName) {
     metaParts.push(
       `<span class="meta-model" data-slot="meta-model">${escapeHtml(model.displayName)}</span>`,
@@ -809,126 +1070,286 @@ function render() {
     );
   }
 
-  rootEl.innerHTML = `
-    <header class="header">
-      <div class="header-left">
-        <h1 class="title">Context</h1>
-      </div>
-      <div class="header-actions">
-        <button type="button" id="info-btn" class="icon-btn icon-btn-quiet" aria-label="About exact and estimated metrics" interestfor="tip-methodology" popovertarget="tip-methodology" popovertargetaction="show">
-          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <circle cx="8" cy="8" r="6"/>
-            <path d="M8 7.5v3.5"/>
-            <circle cx="8" cy="5.25" r="0.6" fill="currentColor" stroke="none"/>
-          </svg>
-        </button>
-        <div id="tip-methodology" popover="hint" role="tooltip" class="tip-popover tip-popover-end">Total active tokens, cache split, output tokens, and checkpoints are exact from local transcript.jsonl. Category splits and MCP/rule footprints are local estimates because server-side prompt categories are not stored in transcripts.</div>
-        <button type="button" id="refresh-btn" class="icon-btn${isRefreshing ? " spinning" : ""}" aria-label="Refresh context metrics" title="Refresh"${isRefreshing ? ' aria-disabled="true"' : ""}>
-          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M13.5 8a5.5 5.5 0 1 1-1.4-3.67"/>
-            <path d="M13.5 2.5v2.75h-2.75"/>
-          </svg>
-        </button>
-      </div>
-    </header>
+  const isAttached =
+    Boolean(attachedConversationId) &&
+    attachedConversationId === current?.conversationId;
+  const attachControls =
+    canAttachModelContext() && current?.hasUsageData
+      ? `<button type="button" id="attach-context-btn" class="pill-btn${isAttached ? " is-attached" : ""}">${isAttached ? "Attached" : "Attach context"}</button>${isAttached ? '<button type="button" id="clear-context-btn" class="pill-btn pill-btn-quiet">Clear</button>' : ""}`
+      : "";
 
-    ${errorBanner}
+  // Trajectory drawer
+  const trajPoints = current?.trajectory?.points || [];
+  const trajCountLabel = current?.trajectory
+    ? `${current.trajectory.totalTurnCount} turns`
+    : "Loading…";
+  activeTrajectoryCoords =
+    current?.trajectory && trajPoints.length >= 2
+      ? computeTrajectoryGeometry(current.trajectory, model?.contextWindow)?.coords || null
+      : null;
 
-    <div class="thread-bar">
-      <label for="thread-select" class="sr-only">Conversation</label>
-      <select id="thread-select" class="thread-select" ${conversations.length === 0 ? "disabled" : ""}>
-        ${threadOptions || '<option value="">No local transcripts found</option>'}
-      </select>
-      <div class="thread-meta">${metaParts.join("")}</div>
-    </div>
+  const trajectoryDrawer = current?.hasUsageData
+    ? `<details class="drawer drawer-card" data-drawer-id="trajectory"${isDrawerOpen("trajectory") ? " open" : ""}>
+         <summary>
+           ${renderChevronSvg()}
+           <span>Trajectory</span>
+           <span class="drawer-count">${escapeHtml(trajCountLabel)}</span>
+         </summary>
+         <div class="drawer-body drawer-body-flush">
+           ${
+             current.trajectory
+               ? renderTrajectoryChart(current.trajectory, model?.contextWindow)
+               : `<div class="traj-empty">Loading trajectory…</div>`
+           }
+         </div>
+       </details>`
+    : "";
 
-    <div class="usage-block">
-      <div class="usage-summary">
-        <span class="usage-percent" data-slot="used-headline">${escapeHtml(usedHeadline)}</span>
-        <span class="usage-fraction" data-slot="fraction-text">${escapeHtml(fractionText)}</span>
-      </div>
-      <div class="bar-track" role="img" aria-label="Context usage bar: ${escapeHtml(usedHeadline)}, ${escapeHtml(fractionText)}">
-        ${barSegments.join("")}
-      </div>
-    </div>
+  const topTools = current?.topTools || [];
+  const topToolsDrawer = current?.hasUsageData
+    ? `<details class="drawer drawer-card" data-drawer-id="top-tools"${isDrawerOpen("top-tools") ? " open" : ""}>
+         <summary>
+           ${renderChevronSvg()}
+           <span>Top tools</span>
+           <span class="drawer-count">${current.topTools ? String(topTools.length) : "…"}</span>
+         </summary>
+         <div class="drawer-body">
+           ${
+             current.topTools
+               ? renderTopToolsContent(topTools)
+               : `<div class="sub-empty">Loading tool attribution…</div>`
+           }
+         </div>
+       </details>`
+    : "";
 
-    ${
-      primaryRows.length > 0
-        ? `<ul class="rows" role="list">${primaryRows.join("")}</ul>`
-        : `<div class="empty-state">No planner token usage recorded in this conversation yet.</div>`
-    }
+  const artifacts = current?.artifacts;
+  const artifactsDrawer = current
+    ? `<details class="drawer drawer-card" data-drawer-id="artifacts"${isDrawerOpen("artifacts") ? " open" : ""}>
+         <summary>
+           ${renderChevronSvg()}
+           <span>Artifacts</span>
+           <span class="drawer-count">${artifacts ? `${artifacts.count}${artifacts.count > 0 ? ` · ~${formatTokens(artifacts.totalEstTokens)}` : ""}` : "…"}</span>
+         </summary>
+         <div class="drawer-body">
+           ${
+             artifacts
+               ? renderArtifactsContent(artifacts)
+               : `<div class="sub-empty">Loading artifacts…</div>`
+           }
+         </div>
+       </details>`
+    : "";
 
-    ${
-      secondaryRows.length > 0
-        ? `<ul class="rows rows-secondary" role="list">${secondaryRows.join("")}</ul>`
-        : ""
-    }
+  const detailPairHtml =
+    topToolsDrawer || artifactsDrawer
+      ? `<div class="detail-pair">${topToolsDrawer}${artifactsDrawer}</div>`
+      : "";
 
-    <div class="drawers">
-      <details class="drawer" data-drawer-id="mcp"${openDrawers.has("mcp") ? " open" : ""}>
-        <summary>
-          ${renderChevronSvg()}
-          <span>MCP tools</span>
-          <span class="drawer-count" data-slot="mcp-count">${escapeHtml(mcpHeaderCount)}</span>
-        </summary>
-        <div class="drawer-body">
-          ${mcpDrawerHtml}
+  return `
+    <div class="inspector-inner">
+      <header class="header">
+        <div class="header-left">
+          <h1 class="title">Context</h1>
+          ${current?.title ? `<span class="header-thread-title" title="${escapeHtml(current.title)}">${escapeHtml(current.title)}</span>` : ""}
         </div>
-      </details>
-
-      <details class="drawer" data-drawer-id="rules"${openDrawers.has("rules") ? " open" : ""}>
-        <summary>
-          ${renderChevronSvg()}
-          <span>Rules &amp; skills</span>
-          <span class="drawer-count" data-slot="rules-count">${escapeHtml(String((rulesInfo?.count ?? 0) + (skillsInfo?.count ?? 0)))}</span>
-        </summary>
-        <div class="drawer-body">
-          ${ruleListHtml}
-          ${skillsRowHtml}
+        <div class="header-actions">
+          ${renderWorkspacePicker(inventory)}
+          ${attachControls}
+          <button type="button" id="info-btn" class="icon-btn icon-btn-quiet" aria-label="About exact and estimated metrics" interestfor="tip-methodology" popovertarget="tip-methodology" popovertargetaction="show">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="8" cy="8" r="6"/>
+              <path d="M8 7.5v3.5"/>
+              <circle cx="8" cy="5.25" r="0.6" fill="currentColor" stroke="none"/>
+            </svg>
+          </button>
+          <div id="tip-methodology" popover="hint" role="tooltip" class="tip-popover tip-popover-end">Total active tokens, cache split, output tokens, and checkpoints are exact from local transcript.jsonl. Category splits, tool attribution, and MCP/rule/artifact footprints are local estimates.</div>
+          <button type="button" id="refresh-btn" class="icon-btn${isRefreshing ? " spinning" : ""}" aria-label="Refresh context metrics" title="Refresh (r)"${isRefreshing ? ' aria-disabled="true"' : ""}>
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M13.5 8a5.5 5.5 0 1 1-1.4-3.67"/>
+              <path d="M13.5 2.5v2.75h-2.75"/>
+            </svg>
+          </button>
         </div>
-      </details>
+      </header>
+
+      ${errorBanner}
+
+      <div class="thread-bar">
+        <div class="thread-select-row">
+          <label for="thread-select" class="sr-only">Conversation</label>
+          <select id="thread-select" class="thread-select" ${conversations.length === 0 ? "disabled" : ""}>
+            ${threadOptions || '<option value="">No interactive transcripts found</option>'}
+          </select>
+          <label class="toggle-chip" for="compact-subagents-toggle" title="Include subagent and background worker transcripts">
+            <input id="compact-subagents-toggle" type="checkbox"${includeSubagents ? " checked" : ""} />
+            <span>Show all</span>
+          </label>
+        </div>
+        <div class="thread-meta">${metaParts.join("")}</div>
+      </div>
+
+      <div class="usage-block">
+        <div class="usage-summary">
+          <span class="usage-percent" data-slot="used-headline">${escapeHtml(usedHeadline)}</span>
+          <span class="usage-fraction" data-slot="fraction-text">${escapeHtml(fractionText)}</span>
+        </div>
+        <div class="bar-track" role="img" aria-label="Context usage bar: ${escapeHtml(usedHeadline)}, ${escapeHtml(fractionText)}">
+          ${barSegments.join("")}
+        </div>
+      </div>
 
       ${
-        current?.hasUsageData
-          ? `<details class="drawer" data-drawer-id="exact"${openDrawers.has("exact") ? " open" : ""}>
-              <summary>
-                ${renderChevronSvg()}
-                <span>Exact transcript counters</span>
-                <span class="drawer-count" data-slot="exact-turns">${escapeHtml(String(exact.turnCount))} turns</span>
-              </summary>
-              <div class="drawer-body">
-                <dl class="kv-grid">
-                  <dt class="kv-key">Active prompt</dt>
-                  <dd class="kv-val" data-slot="kv-active">${escapeHtml(formatExactNumber(exact.activeTokens))}</dd>
-                  <dt class="kv-key">Cache read</dt>
-                  <dd class="kv-val" data-slot="kv-cache">${escapeHtml(formatExactNumber(exact.cacheReadTokens))} (${escapeHtml(String(exact.cacheHitPercent))}%)</dd>
-                  <dt class="kv-key">Uncached input</dt>
-                  <dd class="kv-val" data-slot="kv-uncached">${escapeHtml(formatExactNumber(exact.inputTokens))}</dd>
-                  <dt class="kv-key">Last output</dt>
-                  <dd class="kv-val" data-slot="kv-last-out">${escapeHtml(formatExactNumber(exact.lastOutputTokens))}</dd>
-                  <dt class="kv-key">Session output</dt>
-                  <dd class="kv-val" data-slot="kv-total-out">${escapeHtml(formatExactNumber(exact.totalOutputTokens))}</dd>
-                  <dt class="kv-key">Compactions</dt>
-                  <dd class="kv-val" data-slot="kv-compactions">${escapeHtml(String(exact.checkpointCount))}</dd>
-                  <dt class="kv-key">Model ID</dt>
-                  <dd class="kv-val" data-slot="kv-model">${escapeHtml(model?.id || "—")}</dd>
-                  <dt class="kv-key">Updated</dt>
-                  <dd class="kv-val" data-slot="updated-rel">${escapeHtml(formatRelativeTime(current.lastUpdated) || current.lastUpdated)}</dd>
-                </dl>
-              </div>
-            </details>`
+        primaryRows.length > 0
+          ? `<ul class="rows" role="list">${primaryRows.join("")}</ul>`
+          : `<div class="empty-state">No planner token usage recorded in this conversation yet.</div>`
+      }
+
+      ${
+        secondaryRows.length > 0
+          ? `<ul class="rows rows-secondary" role="list">${secondaryRows.join("")}</ul>`
           : ""
       }
+
+      <div class="drawers">
+        ${trajectoryDrawer}
+        ${detailPairHtml}
+
+        <details class="drawer" data-drawer-id="mcp"${isDrawerOpen("mcp") ? " open" : ""}>
+          <summary>
+            ${renderChevronSvg()}
+            <span>MCP tools</span>
+            <span class="drawer-count" data-slot="mcp-count">${escapeHtml(mcpHeaderCount)}</span>
+          </summary>
+          <div class="drawer-body">
+            ${mcpDrawerHtml}
+          </div>
+        </details>
+
+        <details class="drawer" data-drawer-id="rules"${isDrawerOpen("rules") ? " open" : ""}>
+          <summary>
+            ${renderChevronSvg()}
+            <span>Rules &amp; skills</span>
+            <span class="drawer-count" data-slot="rules-count">${escapeHtml(String((rulesInfo?.count ?? 0) + (skillsInfo?.count ?? 0)))}</span>
+          </summary>
+          <div class="drawer-body">
+            ${wsSummaryLine}
+            ${ruleListHtml}
+            ${skillsRowHtml}
+          </div>
+        </details>
+
+        ${
+          current?.hasUsageData
+            ? `<details class="drawer" data-drawer-id="exact"${isDrawerOpen("exact") ? " open" : ""}>
+                <summary>
+                  ${renderChevronSvg()}
+                  <span>Exact transcript counters</span>
+                  <span class="drawer-count" data-slot="exact-turns">${escapeHtml(String(exact.turnCount))} turns</span>
+                </summary>
+                <div class="drawer-body">
+                  <dl class="kv-grid">
+                    <dt class="kv-key">Active prompt</dt>
+                    <dd class="kv-val" data-slot="kv-active">${escapeHtml(formatExactNumber(exact.activeTokens))}</dd>
+                    <dt class="kv-key">Cache read</dt>
+                    <dd class="kv-val" data-slot="kv-cache">${escapeHtml(formatExactNumber(exact.cacheReadTokens))} (${escapeHtml(String(exact.cacheHitPercent))}%)</dd>
+                    <dt class="kv-key">Uncached input</dt>
+                    <dd class="kv-val" data-slot="kv-uncached">${escapeHtml(formatExactNumber(exact.inputTokens))}</dd>
+                    <dt class="kv-key">Last output</dt>
+                    <dd class="kv-val" data-slot="kv-last-out">${escapeHtml(formatExactNumber(exact.lastOutputTokens))}</dd>
+                    <dt class="kv-key">Session output</dt>
+                    <dd class="kv-val" data-slot="kv-total-out">${escapeHtml(formatExactNumber(exact.totalOutputTokens))}</dd>
+                    <dt class="kv-key">Cumulative input</dt>
+                    <dd class="kv-val" data-slot="kv-cum-input">${escapeHtml(formatExactNumber(exact.cumulativeInputTokens))}</dd>
+                    <dt class="kv-key">Cumulative cache read</dt>
+                    <dd class="kv-val" data-slot="kv-cum-cache">${escapeHtml(formatExactNumber(exact.cumulativeCacheReadTokens))}</dd>
+                    <dt class="kv-key">Cache invalidations</dt>
+                    <dd class="kv-val" data-slot="kv-cache-inv">${escapeHtml(String(exact.cacheInvalidationCount ?? 0))}</dd>
+                    <dt class="kv-key">Compactions</dt>
+                    <dd class="kv-val" data-slot="kv-compactions">${escapeHtml(String(exact.checkpointCount))}</dd>
+                    <dt class="kv-key">Model ID</dt>
+                    <dd class="kv-val" data-slot="kv-model">${escapeHtml(model?.id || "—")}</dd>
+                    <dt class="kv-key">Service</dt>
+                    <dd class="kv-val" data-slot="kv-service">${escapeHtml(formatServiceStatus(serviceStatus))}</dd>
+                    <dt class="kv-key">Updated</dt>
+                    <dd class="kv-val" data-slot="updated-rel">${escapeHtml(formatRelativeTime(current.lastUpdated) || current.lastUpdated)}</dd>
+                  </dl>
+                </div>
+              </details>`
+            : ""
+        }
+      </div>
     </div>
   `;
+}
 
-  wireInterestHints(rootEl);
+function render() {
+  if (!currentSnapshot) {
+    rootEl.removeAttribute("aria-busy");
+    if (lastError) {
+      mountedStructureKey = "error";
+      rootEl.innerHTML = `<div class="error-banner" role="alert">${escapeHtml(lastError)}</div>`;
+    }
+    return;
+  }
+
+  rootEl.removeAttribute("aria-busy");
+
+  const activeEl = document.activeElement;
+  const inspectorEl = document.getElementById("inspector");
+  const restoreFocusId =
+    activeEl &&
+    activeEl instanceof HTMLElement &&
+    (inspectorEl ? inspectorEl.contains(activeEl) : rootEl.contains(activeEl)) &&
+    activeEl.id
+      ? activeEl.id
+      : null;
+
+  const nextInspectorHtml = buildInspectorHtml();
+
+  if (inspectorEl && document.getElementById("thread-rail")) {
+    inspectorEl.innerHTML = nextInspectorHtml;
+    wireInterestHints(inspectorEl);
+  } else {
+    rootEl.innerHTML = `
+      <div class="shell">
+        ${renderRailShell(railState, selectedConversationId)}
+        <section class="inspector" id="inspector">
+          ${nextInspectorHtml}
+        </section>
+      </div>
+    `;
+    wireInterestHints(rootEl);
+  }
+
+  syncRailSelectionHighlight();
   mountedStructureKey = computeStructureKey(currentSnapshot, lastError);
   lastRenderedFingerprint = computeSnapshotFingerprint(currentSnapshot);
   highlightedSegId = null;
 
   if (restoreFocusId) {
     document.getElementById(restoreFocusId)?.focus({ preventScroll: true });
+  }
+}
+
+function updateRailBodyDom() {
+  const kpisEl = document.getElementById("rail-kpis");
+  const listEl = document.getElementById("rail-list");
+  const footerEl = document.getElementById("rail-footer");
+  if (kpisEl) kpisEl.innerHTML = renderFleetKpis(railState.fleet);
+  if (listEl) {
+    listEl.innerHTML = renderRailList(railState.items, selectedConversationId, {
+      loading: railState.loading,
+      error: railState.error,
+    });
+  }
+  if (footerEl) {
+    footerEl.innerHTML = renderRailFooter({
+      shown: railState.items.length,
+      totalMatching: railState.totalMatching,
+      hasMore: railState.hasMore,
+      loadingMore: railState.loadingMore,
+    });
   }
 }
 
@@ -963,6 +1384,78 @@ function applySnapshotUpdate(snapshot, { userInitiated = false } = {}) {
   render();
 }
 
+async function savePrefsAndRefresh(patch, { refreshSnap = true, refreshList = false } = {}) {
+  const caps = getHostCaps();
+  if (!caps?.serverTools) return;
+  try {
+    await enqueueToolCall(() =>
+      app.callServerTool({
+        name: "set_context_preferences",
+        arguments: patch,
+      }),
+    );
+  } catch (err) {
+    announceStatus(err instanceof Error ? err.message : "Failed to save preference");
+  }
+  if (refreshSnap) {
+    void refreshSnapshot(selectedConversationId, { silent: false, reason: "prefs" });
+  }
+  if (refreshList && isWideMode) {
+    void refreshRail({ silent: false, resetOffset: true });
+  }
+}
+
+async function handleAttachContext() {
+  if (!canAttachModelContext() || !currentSnapshot?.current?.hasUsageData) return;
+  const text = formatAttachedContextSummary(currentSnapshot);
+  if (!text) return;
+  try {
+    await app.updateModelContext({ content: [{ type: "text", text }] });
+    attachedConversationId = currentSnapshot.current.conversationId;
+    render();
+    announceStatus("Context summary attached to next prompt");
+  } catch (err) {
+    announceStatus(err instanceof Error ? err.message : "Failed to attach context");
+  }
+}
+
+async function handleClearAttachedContext() {
+  if (!canAttachModelContext()) return;
+  try {
+    await app.updateModelContext({ content: [] });
+    attachedConversationId = null;
+    render();
+    announceStatus("Attached context cleared");
+  } catch (err) {
+    announceStatus(err instanceof Error ? err.message : "Failed to clear attached context");
+  }
+}
+
+async function handleOpenFile(uri) {
+  if (!uri || !canOpenAuxFile()) return;
+  try {
+    const res = await app.request(
+      {
+        method: "com.google.antigravity/toggle-aux-pane",
+        params: { tabType: "fileView", uri },
+      },
+      ToggleAuxPaneResultSchema,
+    );
+    if (res?.isError === true) {
+      announceStatus("Could not open file in side pane");
+    }
+  } catch (err) {
+    const code = err?.code;
+    const msg = String(err?.message || "");
+    if (code === -32601 || msg.includes("-32601") || msg.toLowerCase().includes("method not found")) {
+      auxPaneOpenUnsupported = true;
+      render();
+    } else {
+      announceStatus("Could not open file in side pane");
+    }
+  }
+}
+
 function bindDelegatedEvents() {
   rootEl.addEventListener("change", (event) => {
     const target = event.target;
@@ -970,17 +1463,128 @@ function bindDelegatedEvents() {
       const nextId = target.value;
       if (nextId) {
         selectedConversationId = nextId;
+        if (attachedConversationId && attachedConversationId !== nextId) {
+          attachedConversationId = null;
+        }
         void refreshSnapshot(nextId, { silent: false, reason: "thread" });
       }
+      return;
+    }
+
+    if (target instanceof HTMLSelectElement && target.id === "workspace-select") {
+      const nextWs = target.value ? target.value : null;
+      selectedWorkspacePath = nextWs;
+      void savePrefsAndRefresh({ workspacePath: nextWs }, { refreshSnap: true });
+      announceStatus(nextWs ? `Workspace set to ${nextWs}` : "Workspace set to Auto");
+      return;
+    }
+
+    if (target instanceof HTMLInputElement && target.id === "compact-subagents-toggle") {
+      includeSubagents = target.checked;
+      railState.kind = includeSubagents ? "all" : "interactive";
+      const railKindEl = document.getElementById("rail-kind");
+      if (railKindEl instanceof HTMLSelectElement) {
+        railKindEl.value = railState.kind;
+      }
+      void savePrefsAndRefresh(
+        { includeSubagents },
+        { refreshSnap: true, refreshList: true },
+      );
+      return;
+    }
+
+    if (target instanceof HTMLSelectElement && target.id === "rail-kind") {
+      const nextKind = target.value;
+      railState.kind = nextKind;
+      if (nextKind === "interactive" || nextKind === "all") {
+        const nextInclude = nextKind === "all";
+        if (includeSubagents !== nextInclude) {
+          includeSubagents = nextInclude;
+          const compactToggle = document.getElementById("compact-subagents-toggle");
+          if (compactToggle instanceof HTMLInputElement) {
+            compactToggle.checked = includeSubagents;
+          }
+          void savePrefsAndRefresh(
+            { includeSubagents },
+            { refreshSnap: true, refreshList: false },
+          );
+        }
+      }
+      void refreshRail({ silent: false, resetOffset: true });
+      return;
+    }
+
+    if (target instanceof HTMLSelectElement && target.id === "rail-sort") {
+      railState.sort = target.value;
+      void refreshRail({ silent: false, resetOffset: true });
+    }
+  });
+
+  rootEl.addEventListener("input", (event) => {
+    const target = event.target;
+    if (target instanceof HTMLInputElement && target.id === "rail-search") {
+      railState.query = target.value;
+      if (searchDebounceTimer) clearTimeout(searchDebounceTimer);
+      searchDebounceTimer = setTimeout(() => {
+        void refreshRail({ silent: false, resetOffset: true });
+      }, 180);
     }
   });
 
   rootEl.addEventListener("click", (event) => {
     const target = event.target;
     if (!(target instanceof Element)) return;
-    const btn = target.closest("#refresh-btn");
-    if (btn) {
+
+    if (target.closest("#refresh-btn")) {
       void refreshSnapshot(selectedConversationId, { silent: false, reason: "manual" });
+      if (isWideMode) void refreshRail({ silent: false, resetOffset: true });
+      return;
+    }
+
+    if (target.closest("#attach-context-btn")) {
+      void handleAttachContext();
+      return;
+    }
+
+    if (target.closest("#clear-context-btn")) {
+      void handleClearAttachedContext();
+      return;
+    }
+
+    const openBtn = target.closest("[data-open-file-uri]");
+    if (openBtn instanceof HTMLElement && openBtn.dataset.openFileUri) {
+      void handleOpenFile(openBtn.dataset.openFileUri);
+      return;
+    }
+
+    const filterChip = target.closest("[data-rail-filter]");
+    if (filterChip instanceof HTMLElement && filterChip.dataset.railFilter) {
+      const nextFilter = filterChip.dataset.railFilter;
+      railState.filter = nextFilter;
+      for (const chip of rootEl.querySelectorAll("[data-rail-filter]")) {
+        chip.setAttribute(
+          "aria-pressed",
+          chip.dataset.railFilter === nextFilter ? "true" : "false",
+        );
+      }
+      void refreshRail({ silent: false, resetOffset: true });
+      return;
+    }
+
+    if (target.closest("#rail-load-more")) {
+      void refreshRail({ silent: false, resetOffset: false });
+      return;
+    }
+
+    const railItem = target.closest(".rail-item[data-conv-id]");
+    if (railItem instanceof HTMLElement && railItem.dataset.convId) {
+      const nextId = railItem.dataset.convId;
+      selectedConversationId = nextId;
+      if (attachedConversationId && attachedConversationId !== nextId) {
+        attachedConversationId = null;
+      }
+      syncRailSelectionHighlight();
+      void refreshSnapshot(nextId, { silent: false, reason: "thread" });
     }
   });
 
@@ -988,7 +1592,11 @@ function bindDelegatedEvents() {
     const target = event.target;
     if (
       target instanceof HTMLElement &&
-      target.id === "thread-select" &&
+      (target.id === "thread-select" ||
+        target.id === "workspace-select" ||
+        target.id === "rail-search" ||
+        target.id === "rail-sort" ||
+        target.id === "rail-kind") &&
       pendingStructuralRender &&
       !isUserInteracting()
     ) {
@@ -997,11 +1605,18 @@ function bindDelegatedEvents() {
     }
   });
 
-  // Cross-highlight matching bar segment & breakdown row
+  // Segment cross-highlight & SVG trajectory scrubbing
   rootEl.addEventListener("pointerover", (event) => {
-    if (hoverFineQuery && !hoverFineQuery.matches) return;
     const target = event.target;
     if (!(target instanceof Element)) return;
+
+    const hit = target.closest("[data-traj-idx]");
+    if (hit instanceof Element && hit.getAttribute("data-traj-idx") !== null) {
+      updateTrajectoryScrub(Number(hit.getAttribute("data-traj-idx")));
+      return;
+    }
+
+    if (hoverFineQuery && !hoverFineQuery.matches) return;
     const item = target.closest("[data-seg-id]");
     if (item instanceof HTMLElement) {
       setHighlight(item.dataset.segId);
@@ -1009,13 +1624,28 @@ function bindDelegatedEvents() {
   });
 
   rootEl.addEventListener("pointerout", (event) => {
-    if (hoverFineQuery && !hoverFineQuery.matches) return;
     const target = event.target;
     if (!(target instanceof Element)) return;
+
+    const hit = target.closest("[data-traj-idx]");
+    if (hit) {
+      const related = event.relatedTarget;
+      if (!(related instanceof Element) || !related.closest("[data-traj-idx]")) {
+        if (activeTrajectoryCoords) {
+          updateTrajectoryScrub(activeTrajectoryCoords.length - 1);
+        }
+      }
+      return;
+    }
+
+    if (hoverFineQuery && !hoverFineQuery.matches) return;
     const item = target.closest("[data-seg-id]");
     if (!item) return;
     const related = event.relatedTarget;
-    if (related instanceof Element && related.closest("[data-seg-id]")?.dataset.segId === item.dataset.segId) {
+    if (
+      related instanceof Element &&
+      related.closest("[data-seg-id]")?.dataset.segId === item.dataset.segId
+    ) {
       return;
     }
     setHighlight(null);
@@ -1024,6 +1654,11 @@ function bindDelegatedEvents() {
   rootEl.addEventListener("focusin", (event) => {
     const target = event.target;
     if (!(target instanceof Element)) return;
+    const hit = target.closest("[data-traj-idx]");
+    if (hit && hit.getAttribute("data-traj-idx") !== null) {
+      updateTrajectoryScrub(Number(hit.getAttribute("data-traj-idx")));
+      return;
+    }
     const item = target.closest("[data-seg-id]");
     if (item instanceof HTMLElement) {
       setHighlight(item.dataset.segId);
@@ -1033,21 +1668,105 @@ function bindDelegatedEvents() {
   rootEl.addEventListener("focusout", (event) => {
     const target = event.target;
     if (!(target instanceof Element)) return;
+    const hit = target.closest("[data-traj-idx]");
+    if (hit) {
+      const related = event.relatedTarget;
+      if (!(related instanceof Element) || !related.closest("[data-traj-idx]")) {
+        if (activeTrajectoryCoords) {
+          updateTrajectoryScrub(activeTrajectoryCoords.length - 1);
+        }
+      }
+      return;
+    }
     const item = target.closest("[data-seg-id]");
     if (!item) return;
     const related = event.relatedTarget;
-    if (related instanceof Element && related.closest("[data-seg-id]")?.dataset.segId === item.dataset.segId) {
+    if (
+      related instanceof Element &&
+      related.closest("[data-seg-id]")?.dataset.segId === item.dataset.segId
+    ) {
       return;
     }
     setHighlight(null);
   });
+
+  // Keyboard shortcuts (IME-safe)
+  document.addEventListener("keydown", (event) => {
+    if (event.isComposing || event.keyCode === 229) return;
+    const active = document.activeElement;
+    const inTextControl =
+      active instanceof HTMLInputElement ||
+      active instanceof HTMLTextAreaElement ||
+      active instanceof HTMLSelectElement;
+
+    if (event.key === "Escape") {
+      if (active instanceof HTMLInputElement && active.id === "rail-search" && active.value) {
+        event.preventDefault();
+        active.value = "";
+        railState.query = "";
+        void refreshRail({ silent: false, resetOffset: true });
+        return;
+      }
+      for (const pop of document.querySelectorAll("[popover]:is(:popover-open, .\\:popover-open)")) {
+        try {
+          pop.hidePopover?.();
+        } catch {}
+      }
+      return;
+    }
+
+    if (event.key === "/" && !inTextControl && !event.metaKey && !event.ctrlKey && !event.altKey) {
+      if (isWideMode) {
+        const searchEl = document.getElementById("rail-search");
+        if (searchEl instanceof HTMLInputElement) {
+          event.preventDefault();
+          searchEl.focus();
+          searchEl.select();
+        }
+      }
+      return;
+    }
+
+    if (
+      (event.key === "r" || event.key === "R") &&
+      !inTextControl &&
+      !event.metaKey &&
+      !event.ctrlKey &&
+      !event.altKey
+    ) {
+      event.preventDefault();
+      void refreshSnapshot(selectedConversationId, { silent: false, reason: "manual" });
+      if (isWideMode) void refreshRail({ silent: false, resetOffset: true });
+      return;
+    }
+
+    const railList = document.getElementById("rail-list");
+    if (
+      railList &&
+      active instanceof HTMLElement &&
+      railList.contains(active) &&
+      (event.key === "ArrowDown" ||
+        event.key === "ArrowUp" ||
+        event.key === "j" ||
+        event.key === "k")
+    ) {
+      const items = Array.from(railList.querySelectorAll(".rail-item"));
+      const curIdx = items.indexOf(active);
+      if (curIdx !== -1 && items.length > 0) {
+        event.preventDefault();
+        const delta = event.key === "ArrowDown" || event.key === "j" ? 1 : -1;
+        const nextIdx = Math.max(0, Math.min(items.length - 1, curIdx + delta));
+        items[nextIdx]?.focus();
+      }
+    }
+  });
 }
 
 async function refreshSnapshot(conversationId, { silent = false, reason = "manual" } = {}) {
-  if (isRefreshing) return;
-  const caps = app.getHostCapabilities();
+  const caps = getHostCaps();
   if (!caps?.serverTools) return;
 
+  const mySeq = ++snapshotSeq;
   isRefreshing = true;
   const startedAt = performance.now();
   if (!silent) {
@@ -1061,56 +1780,170 @@ async function refreshSnapshot(conversationId, { silent = false, reason = "manua
 
   let succeeded = false;
   try {
-    const args = conversationId ? { conversationId } : {};
-    const result = await app.callServerTool({
-      name: "get_context_snapshot",
-      arguments: args,
-    });
+    const args = {};
+    if (conversationId) args.conversationId = conversationId;
+    if (selectedWorkspacePath) args.workspacePath = selectedWorkspacePath;
+    args.includeSubagents = includeSubagents;
+
+    const result = await enqueueToolCall(() =>
+      app.callServerTool({
+        name: "get_context_snapshot",
+        arguments: args,
+      }),
+    );
+
+    if (mySeq !== snapshotSeq) return;
+
     if (result?.structuredContent) {
       selectedConversationId =
         result.structuredContent.selectedConversationId || selectedConversationId;
+      if (result.structuredContent.preferences) {
+        includeSubagents = Boolean(result.structuredContent.preferences.includeSubagents);
+      }
       lastError = null;
       applySnapshotUpdate(result.structuredContent, { userInitiated: !silent });
       succeeded = true;
     }
   } catch (err) {
+    if (mySeq !== snapshotSeq) return;
     lastError = err instanceof Error ? err.message : "Failed to refresh context snapshot";
     if (!silent || !currentSnapshot) {
       render();
     }
   } finally {
-    if (!silent) {
-      const elapsed = performance.now() - startedAt;
-      if (elapsed < 350) {
-        await new Promise((r) => setTimeout(r, 350 - elapsed));
+    if (mySeq === snapshotSeq) {
+      if (!silent) {
+        const elapsed = performance.now() - startedAt;
+        if (elapsed < 350) {
+          await new Promise((r) => setTimeout(r, 350 - elapsed));
+        }
+      }
+      isRefreshing = false;
+      updateRefreshButtonState({
+        spinning: false,
+        refreshed: !silent && succeeded,
+      });
+      if (!silent && succeeded) {
+        refreshDoneTimer = setTimeout(() => {
+          updateRefreshButtonState({ spinning: false, refreshed: false });
+        }, 900);
+        if (reason === "thread") {
+          const title = currentSnapshot?.current?.title;
+          announceStatus(title ? `Switched to ${title}` : "Conversation updated");
+        } else if (reason !== "hydrate" && reason !== "prefs") {
+          announceStatus("Context metrics refreshed");
+        }
+      } else if (!silent && lastError) {
+        announceStatus(`Refresh failed: ${lastError}`);
       }
     }
-    isRefreshing = false;
-    updateRefreshButtonState({
-      spinning: false,
-      refreshed: !silent && succeeded,
+  }
+}
+
+async function refreshRail({ silent = false, resetOffset = true } = {}) {
+  const caps = getHostCaps();
+  if (!caps?.serverTools) return;
+
+  const mySeq = ++railSeq;
+  const nextOffset = resetOffset ? 0 : railState.items.length;
+  if (resetOffset) {
+    railState.loading = !silent || railState.items.length === 0;
+  } else {
+    railState.loadingMore = true;
+  }
+  railState.error = null;
+  updateRailBodyDom();
+
+  try {
+    const result = await enqueueToolCall(() =>
+      app.callServerTool({
+        name: "list_conversations",
+        arguments: {
+          query: railState.query,
+          kind: railState.kind,
+          filter: railState.filter,
+          sort: railState.sort,
+          offset: nextOffset,
+          limit: railState.limit,
+        },
+      }),
+    );
+
+    if (mySeq !== railSeq) return;
+
+    const data = result?.structuredContent;
+    if (data) {
+      railState.fleet = data.fleet || null;
+      railState.totalMatching = data.totalMatching ?? 0;
+      railState.hasMore = Boolean(data.hasMore);
+      railState.offset = nextOffset;
+      railState.items = resetOffset
+        ? data.items || []
+        : [...railState.items, ...(data.items || [])];
+      railLoaded = true;
+    }
+  } catch (err) {
+    if (mySeq !== railSeq) return;
+    railState.error = err instanceof Error ? err.message : "Failed to load conversations";
+  } finally {
+    if (mySeq === railSeq) {
+      railState.loading = false;
+      railState.loadingMore = false;
+      updateRailBodyDom();
+      syncRailSelectionHighlight();
+    }
+  }
+}
+
+function maybeHydrateMount() {
+  if (!isConnected) return;
+  const cur = currentSnapshot?.current;
+  if (cur?.hasUsageData && cur.trajectory === undefined) {
+    void refreshSnapshot(selectedConversationId, { silent: true, reason: "hydrate" });
+  }
+  if (isWideMode && !railLoaded) {
+    void refreshRail({ silent: true, resetOffset: true });
+  }
+}
+
+function setupResizeObserver() {
+  const updateWidth = (width) => {
+    const nextWide = width >= 760;
+    if (nextWide !== isWideMode) {
+      isWideMode = nextWide;
+      if (isWideMode && !railLoaded && isConnected) {
+        void refreshRail({ silent: true, resetOffset: true });
+      }
+      if (currentSnapshot && !isUserInteracting()) {
+        render();
+      }
+    }
+  };
+
+  isWideMode = (rootEl.getBoundingClientRect?.().width || window.innerWidth) >= 760;
+
+  if (typeof ResizeObserver === "function") {
+    const ro = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        updateWidth(entry.contentRect.width);
+      }
     });
-    if (!silent && succeeded) {
-      refreshDoneTimer = setTimeout(() => {
-        updateRefreshButtonState({ spinning: false, refreshed: false });
-      }, 900);
-      if (reason === "thread") {
-        const title = currentSnapshot?.current?.title;
-        announceStatus(title ? `Switched to ${title}` : "Conversation updated");
-      } else {
-        announceStatus("Context metrics refreshed");
-      }
-    } else if (!silent && lastError) {
-      announceStatus(`Refresh failed: ${lastError}`);
-    }
+    ro.observe(rootEl);
   }
 }
 
 function startPolling() {
   if (pollTimer) clearInterval(pollTimer);
   pollTimer = setInterval(() => {
-    if (document.visibilityState === "visible" && !isRefreshing) {
+    if (
+      document.visibilityState === "visible" &&
+      !isRefreshing &&
+      !isUserInteracting()
+    ) {
       void refreshSnapshot(selectedConversationId, { silent: true });
+      if (isWideMode) {
+        void refreshRail({ silent: true, resetOffset: true });
+      }
     }
   }, 15_000);
 }
@@ -1120,14 +1953,33 @@ app.ontoolinput = ({ arguments: args }) => {
   if (args && typeof args.conversationId === "string" && args.conversationId) {
     selectedConversationId = args.conversationId;
   }
+  if (args && typeof args.workspacePath === "string" && args.workspacePath.trim()) {
+    selectedWorkspacePath = args.workspacePath.trim();
+  }
 };
 
 app.ontoolresult = (result) => {
   if (result?.structuredContent) {
-    selectedConversationId =
-      result.structuredContent.selectedConversationId || selectedConversationId;
+    const snap = result.structuredContent;
+    const prevId = selectedConversationId;
+    selectedConversationId = snap.selectedConversationId || selectedConversationId;
+    if (prevId && selectedConversationId !== prevId && attachedConversationId) {
+      attachedConversationId = null;
+    }
+
+    if (snap.preferences) {
+      if (selectedWorkspacePath === null && snap.preferences.workspacePath) {
+        selectedWorkspacePath = snap.preferences.workspacePath;
+      }
+      includeSubagents = Boolean(snap.preferences.includeSubagents);
+      if (includeSubagents && railState.kind === "interactive") {
+        railState.kind = "all";
+      }
+    }
+
     lastError = null;
-    applySnapshotUpdate(result.structuredContent, { userInitiated: true });
+    applySnapshotUpdate(snap, { userInitiated: true });
+    maybeHydrateMount();
   }
 };
 
@@ -1143,14 +1995,21 @@ app.onhostcontextchanged = (ctx) => {
 async function init() {
   setupHintFallbackAndAria();
   bindDelegatedEvents();
+  setupResizeObserver();
   await ensureInterestPolyfill();
   await app.connect();
+  isConnected = true;
   applyThemeFromHost(app.getHostContext());
   startPolling();
 
-  // If opened without an initial tool result yet, fetch snapshot once
   if (!currentSnapshot) {
     void refreshSnapshot(selectedConversationId, { silent: true });
+    if (isWideMode && !railLoaded) {
+      void refreshRail({ silent: true, resetOffset: true });
+    }
+  } else {
+    render();
+    maybeHydrateMount();
   }
 }
 
