@@ -3,16 +3,18 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { RootsListChangedNotificationSchema } from "@modelcontextprotocol/sdk/types.js";
 import {
   registerAppResource,
   registerAppTool,
   RESOURCE_MIME_TYPE,
 } from "@modelcontextprotocol/ext-apps/server";
 import { z } from "zod";
-import { getContextSnapshot } from "./analyzer.mjs";
+import { getContextSnapshot, validateWorkspaceDir } from "./analyzer.mjs";
 
 const APP_URI = "ui://context-monitor/app.html";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+let cachedMcpRoots = null;
 
 function loadAppHtml() {
   const overridePath = process.env.CONTEXT_MONITOR_HTML;
@@ -36,31 +38,74 @@ function loadAppHtml() {
   );
 }
 
+async function resolveMcpRoots(mcpServer, { workspacePath } = {}) {
+  if (validateWorkspaceDir(workspacePath)) {
+    return undefined;
+  }
+
+  const rootsCap = mcpServer.server.getClientCapabilities()?.roots;
+  if (!rootsCap) {
+    return [];
+  }
+
+  if (cachedMcpRoots !== null && rootsCap.listChanged === true) {
+    return cachedMcpRoots;
+  }
+
+  try {
+    const result = await mcpServer.server.listRoots(undefined, { timeout: 250 });
+    const uris = Array.isArray(result?.roots)
+      ? result.roots.map((r) => r?.uri).filter((u) => typeof u === "string")
+      : [];
+    if (uris.length > 0 && rootsCap.listChanged === true) {
+      cachedMcpRoots = uris;
+    }
+    return uris;
+  } catch {
+    return [];
+  }
+}
+
 function formatSummaryText(snapshot) {
+  const svc = snapshot.serviceStatus;
+  const svcLine =
+    svc && !svc.reachable
+      ? `\nConversationService: offline (${svc.reason})`
+      : svc?.reason === "partial"
+        ? `\nConversationService: partial (${svc.enrichedCount} enriched)`
+        : "";
+
   const cur = snapshot.current;
   if (!cur) {
-    return "No local Antigravity conversation transcripts were found under ~/.gemini/antigravity/brain.";
+    return `No local Antigravity conversation transcripts were found under ~/.gemini/antigravity/brain.${svcLine}`;
   }
   if (!cur.hasUsageData) {
-    return `Conversation "${cur.title}" (${cur.conversationId}) has no recorded planner token usage yet.`;
+    return `Conversation "${cur.title}" (${cur.conversationId}) has no recorded planner token usage yet.${svcLine}`;
   }
   const ex = cur.exact;
   const win = cur.model.contextWindow
     ? `${ex.usedPercent}% of ${cur.model.contextWindow.toLocaleString("en-US")} (${cur.model.windowSource})`
     : `unknown context window (${cur.model.windowSource})`;
-  return [
-    `Context Monitor: ${cur.title}`,
-    `Model: ${cur.model.displayName} (${cur.model.id})`,
-    `Active prompt (exact): ${ex.activeTokens.toLocaleString("en-US")} tokens — ${win}`,
-    `Cache split (exact): ${ex.cacheReadTokens.toLocaleString("en-US")} cached (${ex.cacheHitPercent}%) + ${ex.inputTokens.toLocaleString("en-US")} uncached`,
-    `Turns: ${ex.turnCount} | Checkpoints: ${ex.checkpointCount} | Session output: ${ex.totalOutputTokens.toLocaleString("en-US")}`,
-    `Local MCP inventory: ${snapshot.inventory.mcp.activeToolCount} configured tools (${snapshot.inventory.mcp.totalCachedToolCount} cached schemas on disk)`,
-  ].join("\n");
+  return (
+    [
+      `Context Monitor: ${cur.title}`,
+      `Model: ${cur.model.displayName} (${cur.model.id})`,
+      `Active prompt (exact): ${ex.activeTokens.toLocaleString("en-US")} tokens — ${win}`,
+      `Cache split (exact): ${ex.cacheReadTokens.toLocaleString("en-US")} cached (${ex.cacheHitPercent}%) + ${ex.inputTokens.toLocaleString("en-US")} uncached`,
+      `Turns: ${ex.turnCount} | Checkpoints: ${ex.checkpointCount} | Session output: ${ex.totalOutputTokens.toLocaleString("en-US")}`,
+      `Tracked conversations: ${snapshot.conversations.length} shown / ${snapshot.totalTrackedConversations} tracked`,
+      `Local MCP inventory: ${snapshot.inventory.mcp.activeToolCount} configured tools (${snapshot.inventory.mcp.totalCachedToolCount} cached schemas on disk)`,
+    ].join("\n") + svcLine
+  );
 }
 
 const server = new McpServer({
   name: "context-monitor",
-  version: "0.1.1",
+  version: "0.1.2",
+});
+
+server.server.setNotificationHandler(RootsListChangedNotificationSchema, () => {
+  cachedMcpRoots = null;
 });
 
 registerAppResource(
@@ -107,7 +152,19 @@ registerAppTool(
         .string()
         .optional()
         .describe(
-          "Optional conversation ID to inspect. Defaults to the most recently modified local transcript.",
+          "Optional conversation ID to inspect. Defaults to the most recently modified interactive transcript.",
+        ),
+      workspacePath: z
+        .string()
+        .optional()
+        .describe(
+          "Optional workspace root path for discovering project rules and skills.",
+        ),
+      includeSubagents: z
+        .boolean()
+        .optional()
+        .describe(
+          "Include subagent and background worker threads in the conversation list.",
         ),
     },
     annotations: {
@@ -129,8 +186,13 @@ registerAppTool(
     },
   },
   async (args) => {
+    const mcpRootsPromise = resolveMcpRoots(server, args);
     const snapshot = await getContextSnapshot({
       conversationId: args?.conversationId,
+      workspacePath: args?.workspacePath,
+      includeSubagents: args?.includeSubagents ?? false,
+      includeDetails: false,
+      mcpRoots: mcpRootsPromise,
     });
     return {
       content: [
@@ -152,6 +214,8 @@ registerAppTool(
     description: "App-only tool to fetch or switch conversation context snapshots.",
     inputSchema: {
       conversationId: z.string().optional(),
+      workspacePath: z.string().optional(),
+      includeSubagents: z.boolean().optional(),
       limit: z.number().int().min(1).max(100).optional(),
     },
     annotations: {
@@ -167,9 +231,14 @@ registerAppTool(
     },
   },
   async (args) => {
+    const mcpRootsPromise = resolveMcpRoots(server, args);
     const snapshot = await getContextSnapshot({
       conversationId: args?.conversationId,
+      workspacePath: args?.workspacePath,
+      includeSubagents: args?.includeSubagents ?? false,
       limit: args?.limit,
+      includeDetails: true,
+      mcpRoots: mcpRootsPromise,
     });
     return {
       content: [

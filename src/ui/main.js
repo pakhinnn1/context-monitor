@@ -6,7 +6,7 @@ import {
 
 const rootEl = document.getElementById("app");
 const statusLiveEl = document.getElementById("status-live");
-const app = new App({ name: "Context Monitor", version: "0.1.1" }, {});
+const app = new App({ name: "Context Monitor", version: "0.1.2" }, {});
 
 const hoverFineQuery = window.matchMedia?.("(hover: hover) and (pointer: fine)");
 
@@ -219,6 +219,12 @@ function captureDrawerStates() {
   openDrawers = next;
 }
 
+function formatSkillsScope(byScope) {
+  if (!byScope) return "";
+  const base = `${byScope.plugin} plugin, ${byScope.global} global, ${byScope.builtin} builtin`;
+  return byScope.workspace > 0 ? `${base}, ${byScope.workspace} workspace` : base;
+}
+
 function computeSnapshotFingerprint(snapshot) {
   if (!snapshot) return "";
   const { current, conversations = [], inventory } = snapshot;
@@ -257,7 +263,11 @@ function computeSnapshotFingerprint(snapshot) {
             s.estInstructionTokens,
           ]),
           rules: inventory.rules?.items?.map((r) => [r.name, r.scope, r.estTokens]),
-          skills: [inventory.skills?.count, inventory.skills?.estIndexTokens],
+          skills: [
+            inventory.skills?.count,
+            inventory.skills?.estIndexTokens,
+            inventory.skills?.byScope,
+          ],
         }
       : null,
   });
@@ -489,7 +499,7 @@ function patchInPlace(snapshot) {
       `seg-pct-${seg.id}`,
       seg.percent !== null ? formatPercent(seg.percent) : "—",
     );
-    if (seg.id === "baseline" || seg.id === "checkpoint_summary") {
+    if (Boolean(seg.detail)) {
       setTip(
         `tip-seg-${seg.id}`,
         `${seg.detail} Exact total active prompt is ${formatExactNumber(exact.activeTokens)} tokens.`,
@@ -554,10 +564,7 @@ function patchInPlace(snapshot) {
       "skills-meta",
       `${skillsInfo.count} (~${formatTokens(skillsInfo.estIndexTokens)})`,
     );
-    setSlot(
-      "skills-scope",
-      `${skillsInfo.byScope.plugin} plugin, ${skillsInfo.byScope.global} global, ${skillsInfo.byScope.builtin} builtin`,
-    );
+    setSlot("skills-scope", formatSkillsScope(skillsInfo.byScope));
   }
 
   setSlot("meta-model", model?.displayName || "");
@@ -662,7 +669,7 @@ function render() {
   const primaryRows = [];
   if (current?.hasUsageData) {
     for (const seg of current.segments || []) {
-      const showTip = seg.id === "baseline" || seg.id === "checkpoint_summary";
+      const showTip = Boolean(seg.detail);
       primaryRows.push(
         renderRow({
           segId: seg.id,
@@ -776,7 +783,7 @@ function render() {
          <div class="sub-row">
            <span class="sub-row-name">Skill headers</span>
            <span class="sub-row-meta" data-slot="skills-meta">${skillsInfo.count} (~${escapeHtml(formatTokens(skillsInfo.estIndexTokens))})</span>
-           <span class="sub-row-note" data-slot="skills-scope">${skillsInfo.byScope.plugin} plugin, ${skillsInfo.byScope.global} global, ${skillsInfo.byScope.builtin} builtin</span>
+           <span class="sub-row-note" data-slot="skills-scope">${escapeHtml(formatSkillsScope(skillsInfo.byScope))}</span>
          </div>
        </div>`
     : "";
