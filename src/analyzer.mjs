@@ -1699,7 +1699,9 @@ function scanBrainTranscripts(paths) {
     }
   }
 
-  transcriptEntries.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  transcriptEntries.sort(
+    (a, b) => b.mtimeMs - a.mtimeMs || a.conversationId.localeCompare(b.conversationId),
+  );
   return transcriptEntries;
 }
 
@@ -1949,14 +1951,26 @@ export async function listConversations({
       if (!aNull && b.usedPercent !== a.usedPercent) {
         return b.usedPercent - a.usedPercent;
       }
-      return b.mtimeMs - a.mtimeMs;
+      return b.mtimeMs - a.mtimeMs || a.conversationId.localeCompare(b.conversationId);
     });
   } else if (safeSort === "tokens_desc") {
-    pool.sort((a, b) => b.activeTokens - a.activeTokens || b.mtimeMs - a.mtimeMs);
+    pool.sort(
+      (a, b) =>
+        b.activeTokens - a.activeTokens ||
+        b.mtimeMs - a.mtimeMs ||
+        a.conversationId.localeCompare(b.conversationId),
+    );
   } else if (safeSort === "checkpoints_desc") {
-    pool.sort((a, b) => b.checkpointCount - a.checkpointCount || b.mtimeMs - a.mtimeMs);
+    pool.sort(
+      (a, b) =>
+        b.checkpointCount - a.checkpointCount ||
+        b.mtimeMs - a.mtimeMs ||
+        a.conversationId.localeCompare(b.conversationId),
+    );
   } else {
-    pool.sort((a, b) => b.mtimeMs - a.mtimeMs);
+    pool.sort(
+      (a, b) => b.mtimeMs - a.mtimeMs || a.conversationId.localeCompare(b.conversationId),
+    );
   }
 
   const items = pool.slice(safeOffset, safeOffset + safeLimit);

@@ -1455,4 +1455,38 @@ describe("Suite 10: listConversations fleet KPIs, search, filtering, sorting, an
       fs.rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it("aligns default snapshot selection and listConversations recent order deterministically on mtimeMs ties", async () => {
+    const { root, geminiHome, paths } = makeGeminiFixture();
+    const now = Date.now();
+    try {
+      const tiedTime = now - 1000;
+      const rows = [
+        { type: "USER_INPUT", content: "Tied task" },
+        {
+          type: "PLANNER_RESPONSE",
+          model: "gemini-4-neon",
+          input_tokens: 1000,
+          cache_read_tokens: 0,
+        },
+      ];
+      writeTranscript(paths, "tie-b", rows, { mtimeMs: tiedTime });
+      writeAnnotation(paths, "tie-b", "Tied B");
+      writeTranscript(paths, "tie-a", rows, { mtimeMs: tiedTime });
+      writeAnnotation(paths, "tie-a", "Tied A");
+
+      await withEnv(
+        { ANTIGRAVITY_LS_ADDRESS: undefined, ANTIGRAVITY_CSRF_TOKEN: undefined },
+        async () => {
+          const list = await listConversations({ geminiHome, sort: "recent" });
+          const snap = await getContextSnapshot({ geminiHome });
+          assert.equal(list.items[0].conversationId, "tie-a");
+          assert.equal(snap.selectedConversationId, list.items[0].conversationId);
+          assert.equal(snap.conversations[0].conversationId, list.items[0].conversationId);
+        },
+      );
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
