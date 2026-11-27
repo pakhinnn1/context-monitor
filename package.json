@@ -1,12 +1,12 @@
 {
   "name": "antigravity-context-monitor",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "type": "module",
   "description": "Local MCP App plugin for Antigravity Desktop showing per-conversation context usage.",
   "scripts": {
     "build": "node scripts/build.mjs",
-    "test": "node scripts/test-server.mjs"
+    "test": "node --test scripts/test-analyzer.mjs && node scripts/test-server.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/ext-apps": "^2.0.4",

@@ -74,6 +74,7 @@
   --seg-blue: #3b82f6;
   --seg-orange: #ea580c;
   --seg-green: #10b981;
+  --seg-amber: #f59e0b;
   --seg-violet: #8b5cf6;
   --seg-slate: #9ca3af;
   --seg-muted: #71717a;
@@ -468,10 +469,13 @@ body {
 }
 
 .swatch-violet,
-.bar-violet,
+.bar-violet {
+  background: var(--seg-violet);
+}
+
 .swatch-amber,
 .bar-amber {
-  background: var(--seg-violet);
+  background: var(--seg-amber);
 }
 
 .swatch-slate,

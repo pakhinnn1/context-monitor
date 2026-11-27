@@ -1,15 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-
-const GEMINI_HOME = path.join(os.homedir(), ".gemini");
-const ANTIGRAVITY_DIR = path.join(GEMINI_HOME, "antigravity");
-const BRAIN_DIR = path.join(ANTIGRAVITY_DIR, "brain");
-const ANNOTATIONS_DIR = path.join(ANTIGRAVITY_DIR, "annotations");
-const MCP_SCHEMAS_DIR = path.join(ANTIGRAVITY_DIR, "mcp");
-const CONFIG_DIR = path.join(GEMINI_HOME, "config");
-const PLUGINS_DIR = path.join(CONFIG_DIR, "plugins");
-const BUILTIN_SKILLS_DIR = path.join(ANTIGRAVITY_DIR, "builtin", "skills");
+import { fileURLToPath } from "node:url";
 
 const MODEL_CATALOG = [
   {
@@ -105,8 +97,62 @@ const MODEL_CATALOG = [
   },
 ];
 
-// Lightweight mtime cache for parsed conversation summaries
+const WORKSPACE_CUSTOMIZATION_DIRS = [".agents", ".agent", "_agents", "_agent"];
+const PER_FILE_RULE_BYTE_CAP = 24_000;
+const SKILL_HEAD_READ_BYTES = 4096;
+const TRAJECTORY_ACTIVE_EPOCH_CAP = 120;
+
+// Lightweight mtime cache for parsed conversation summaries, keyed by resolved transcriptPath
 const summaryCache = new Map();
+
+export function resolvePaths({ geminiHome } = {}) {
+  const resolvedGeminiHome =
+    geminiHome ||
+    process.env.CONTEXT_MONITOR_GEMINI_HOME ||
+    path.join(os.homedir(), ".gemini");
+  const antigravityDir = path.join(resolvedGeminiHome, "antigravity");
+  const configDir = path.join(resolvedGeminiHome, "config");
+  return {
+    geminiHome: resolvedGeminiHome,
+    antigravityDir,
+    brainDir: path.join(antigravityDir, "brain"),
+    annotationsDir: path.join(antigravityDir, "annotations"),
+    mcpSchemasDir: path.join(antigravityDir, "mcp"),
+    configDir,
+    pluginsDir: path.join(configDir, "plugins"),
+    projectsDir: path.join(configDir, "projects"),
+    builtinSkillsDir: path.join(antigravityDir, "builtin", "skills"),
+  };
+}
+
+export function isSafeSingleSegment(id) {
+  if (typeof id !== "string" || id.length === 0 || id === ".") return false;
+  if (id.includes("..") || id.includes("/") || id.includes("\\") || id.includes("\0")) {
+    return false;
+  }
+  return true;
+}
+
+export function validateWorkspaceDir(candidatePath) {
+  if (typeof candidatePath !== "string" || !candidatePath.trim()) return null;
+  try {
+    const real = fs.realpathSync(candidatePath.trim());
+    const st = fs.statSync(real);
+    if (!st.isDirectory()) return null;
+
+    let realHome;
+    try {
+      realHome = fs.realpathSync(os.homedir());
+    } catch {
+      realHome = path.resolve(os.homedir());
+    }
+
+    if (real === path.parse(real).root || real === realHome) return null;
+    return real;
+  } catch {
+    return null;
+  }
+}
 
 export function resolveModelInfo(modelId) {
   if (!modelId || typeof modelId !== "string") {
@@ -156,19 +202,25 @@ function unescapePbtxtString(raw) {
     .trim();
 }
 
-function readAnnotationTitle(conversationId) {
-  const filePath = path.join(ANNOTATIONS_DIR, `${conversationId}.pbtxt`);
+function readAnnotationInfo(conversationId, paths = resolvePaths()) {
+  if (!isSafeSingleSegment(conversationId)) {
+    return { exists: false, title: null };
+  }
+  const filePath = path.join(paths.annotationsDir, `${conversationId}.pbtxt`);
   try {
     const text = fs.readFileSync(filePath, "utf8");
     const m = text.match(/title:\s*"((?:[^"\\]|\\.)*)"/);
-    if (m && m[1]) {
-      const cleaned = unescapePbtxtString(m[1]);
-      if (cleaned) return cleaned;
-    }
+    const cleaned = m && m[1] ? unescapePbtxtString(m[1]) : "";
+    return { exists: true, title: cleaned || null };
   } catch {
-    // Missing annotation file is normal for subagents or untitled threads
+    return { exists: false, title: null };
   }
-  return null;
+}
+
+function classifyConversationKind(hasAnnotation, serviceInfo) {
+  if (serviceInfo?.parentConversationId) return "subagent";
+  if (hasAnnotation || Boolean(serviceInfo)) return "interactive";
+  return "background";
 }
 
 function extractRequestSnippet(content) {
@@ -189,45 +241,81 @@ function extractRequestSnippet(content) {
   return normalized.length > 240 ? `${normalized.slice(0, 239)}…` : normalized;
 }
 
-async function fetchConversationServiceTitles(limit = 50) {
+export async function fetchConversationServiceTitles(maxCount = 200) {
   const lsAddress = process.env.ANTIGRAVITY_LS_ADDRESS;
   const csrfToken = process.env.ANTIGRAVITY_CSRF_TOKEN;
-  if (!lsAddress || !csrfToken) return new Map();
+  if (!lsAddress || !csrfToken) {
+    return {
+      map: new Map(),
+      status: { reachable: false, reason: "missing_env", enrichedCount: 0 },
+    };
+  }
 
+  const targetCount = Math.max(1, Math.min(200, Number(maxCount) || 200));
+  const map = new Map();
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 350);
+  let page1Succeeded = false;
+  let pageToken = "";
+
   try {
-    const res = await fetch(
-      `http://${lsAddress}/product.v1.ConversationService/ListConversations`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Connect-Protocol-Version": "1",
-          "x-antigravity-csrf-token": csrfToken,
+    for (let page = 0; page < 2 && map.size < targetCount; page += 1) {
+      const body = {
+        pageSize: Math.min(100, targetCount - map.size),
+        includeArchived: false,
+      };
+      if (pageToken) body.pageToken = pageToken;
+
+      const res = await fetch(
+        `http://${lsAddress}/product.v1.ConversationService/ListConversations`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Connect-Protocol-Version": "1",
+            "x-antigravity-csrf-token": csrfToken,
+          },
+          body: JSON.stringify(body),
+          signal: controller.signal,
         },
-        body: JSON.stringify({ pageSize: limit, includeArchived: false }),
-        signal: controller.signal,
-      },
-    );
-    if (!res.ok) return new Map();
-    const data = await res.json();
-    const map = new Map();
-    for (const conv of data.conversations || []) {
-      if (!conv?.id) continue;
-      const title =
-        conv.annotations?.title?.trim() ||
-        conv.state?.summary?.trim() ||
-        null;
-      map.set(conv.id, {
-        title,
-        runState: conv.state?.runState || null,
-        updateTime: conv.state?.updateTime || null,
-      });
+      );
+
+      if (!res.ok) {
+        return page1Succeeded
+          ? { map, status: { reachable: true, reason: "partial", enrichedCount: map.size } }
+          : { map: new Map(), status: { reachable: false, reason: "http_error", enrichedCount: 0 } };
+      }
+
+      const data = await res.json();
+      for (const conv of data.conversations || []) {
+        if (!conv?.id) continue;
+        const title =
+          conv.annotations?.title?.trim() ||
+          conv.state?.summary?.trim() ||
+          null;
+        map.set(conv.id, {
+          title,
+          runState: conv.state?.runState || null,
+          updateTime: conv.state?.updateTime || null,
+          projectId: conv.metadata?.projectId || null,
+          parentConversationId: conv.metadata?.parentConversationId || null,
+          rootConversationId: conv.metadata?.rootConversationId || null,
+        });
+      }
+
+      page1Succeeded = true;
+      pageToken = typeof data.nextPageToken === "string" ? data.nextPageToken : "";
+      if (!pageToken) break;
     }
-    return map;
+
+    return {
+      map,
+      status: { reachable: true, reason: "ok", enrichedCount: map.size },
+    };
   } catch {
-    return new Map();
+    return page1Succeeded
+      ? { map, status: { reachable: true, reason: "partial", enrichedCount: map.size } }
+      : { map: new Map(), status: { reachable: false, reason: "timeout_or_network", enrichedCount: 0 } };
   } finally {
     clearTimeout(timeout);
   }
@@ -247,20 +335,32 @@ function parseJsonlFile(filePath) {
   return rows;
 }
 
-function estimateRowChars(row) {
+function serializedToolCallChars(call) {
+  try {
+    return JSON.stringify(call).length;
+  } catch {
+    return 120;
+  }
+}
+
+function estimateAgentTextChars(row) {
   let chars = 0;
   if (typeof row.content === "string") chars += row.content.length;
   if (typeof row.thinking === "string") chars += row.thinking.length;
-  if (Array.isArray(row.tool_calls)) {
-    for (const call of row.tool_calls) {
-      try {
-        chars += JSON.stringify(call).length;
-      } catch {
-        chars += 120;
-      }
-    }
+  return chars;
+}
+
+function estimateToolCallsChars(row) {
+  if (!Array.isArray(row.tool_calls) || row.tool_calls.length === 0) return 0;
+  let chars = 0;
+  for (const call of row.tool_calls) {
+    chars += serializedToolCallChars(call);
   }
   return chars;
+}
+
+function estimateRowChars(row) {
+  return estimateAgentTextChars(row) + estimateToolCallsChars(row);
 }
 
 function allocateProportionally(total, weights) {
@@ -281,7 +381,7 @@ function allocateProportionally(total, weights) {
     remainders.push({ key, frac: exact - floored });
   }
 
-  let leftover = total - assigned;
+  const leftover = total - assigned;
   remainders.sort((a, b) => b.frac - a.frac);
   for (let i = 0; i < leftover && i < remainders.length; i += 1) {
     result[remainders[i].key] += 1;
@@ -320,25 +420,27 @@ function allocatePercentageTenths(items, totalTenths) {
   return result;
 }
 
-function loadBestTranscriptRows(conversationId, compactPath) {
-  const fullPath = path.join(
-    BRAIN_DIR,
-    conversationId,
-    ".system_generated",
-    "logs",
-    "transcript_full.jsonl",
-  );
-  try {
-    const stat = fs.statSync(fullPath);
-    // Use full transcript for better proportional weights when size is modest (<= 4 MiB)
-    if (stat.isFile() && stat.size > 0 && stat.size <= 4 * 1024 * 1024) {
-      return {
-        rows: parseJsonlFile(fullPath),
-        usedFullTranscript: true,
-      };
+function loadBestTranscriptRows(conversationId, compactPath, paths = resolvePaths()) {
+  if (isSafeSingleSegment(conversationId)) {
+    const fullPath = path.join(
+      paths.brainDir,
+      conversationId,
+      ".system_generated",
+      "logs",
+      "transcript_full.jsonl",
+    );
+    try {
+      const stat = fs.statSync(fullPath);
+      // Use full transcript for better proportional weights when size is modest (<= 4 MiB)
+      if (stat.isFile() && stat.size > 0 && stat.size <= 4 * 1024 * 1024) {
+        return {
+          rows: parseJsonlFile(fullPath),
+          usedFullTranscript: true,
+        };
+      }
+    } catch {
+      // Fall back to compact transcript.jsonl
     }
-  } catch {
-    // Fall back to compact transcript.jsonl
   }
   return {
     rows: parseJsonlFile(compactPath),
@@ -346,50 +448,340 @@ function loadBestTranscriptRows(conversationId, compactPath) {
   };
 }
 
-function analyzeTranscriptRows(conversationId, rows, mtimeIso, titleOverride, runState, usedFullTranscript) {
+const TRAJECTORY_KIND_PRIORITY = {
+  checkpoint_peak: 3,
+  checkpoint_baseline: 2,
+  turn: 1,
+};
+
+function toTrajectoryPoint(pt, kind) {
+  return {
+    turn: pt.turn,
+    stepIndex: typeof pt.row.step_index === "number" ? pt.row.step_index : pt.rowIndex,
+    activeTokens: pt.activeTokens,
+    inputTokens: pt.inputTokens,
+    cacheReadTokens: pt.cacheReadTokens,
+    outputTokens: pt.outputTokens,
+    kind,
+    createdAt: pt.row.created_at || null,
+  };
+}
+
+function buildTrajectory(plannerTurns, checkpointIndices) {
+  const totalTurnCount = plannerTurns.length;
+  const checkpointCount = checkpointIndices.length;
+
+  if (totalTurnCount === 0) {
+    return {
+      points: [],
+      totalTurnCount: 0,
+      checkpointCount,
+      isBounded: false,
+    };
+  }
+
+  if (checkpointCount === 0) {
+    let isBounded = false;
+    let points = plannerTurns.map((pt) => toTrajectoryPoint(pt, "turn"));
+    if (points.length > TRAJECTORY_ACTIVE_EPOCH_CAP) {
+      isBounded = true;
+      points = [points[0], ...points.slice(-(TRAJECTORY_ACTIVE_EPOCH_CAP - 1))];
+    }
+    return {
+      points,
+      totalTurnCount,
+      checkpointCount: 0,
+      isBounded,
+    };
+  }
+
+  const byTurn = new Map();
+  const upsertPoint = (point) => {
+    const existing = byTurn.get(point.turn);
+    if (
+      !existing ||
+      TRAJECTORY_KIND_PRIORITY[point.kind] > TRAJECTORY_KIND_PRIORITY[existing.kind]
+    ) {
+      byTurn.set(point.turn, point);
+    }
+  };
+
+  upsertPoint(toTrajectoryPoint(plannerTurns[0], "turn"));
+
+  for (const cpIdx of checkpointIndices) {
+    let peak = null;
+    let baseline = null;
+    for (const pt of plannerTurns) {
+      if (pt.rowIndex < cpIdx) {
+        peak = pt;
+      } else if (pt.rowIndex > cpIdx && !baseline) {
+        baseline = pt;
+        break;
+      }
+    }
+    if (peak) upsertPoint(toTrajectoryPoint(peak, "checkpoint_peak"));
+    if (baseline) upsertPoint(toTrajectoryPoint(baseline, "checkpoint_baseline"));
+  }
+
+  const lastCpIdx = checkpointIndices[checkpointIndices.length - 1];
+  const activeEpochTurns = plannerTurns.filter((pt) => pt.rowIndex > lastCpIdx);
+  let isBounded = false;
+
+  if (activeEpochTurns.length > 0) {
+    let activePoints = activeEpochTurns.map((pt, idx) =>
+      toTrajectoryPoint(pt, idx === 0 ? "checkpoint_baseline" : "turn"),
+    );
+    if (activePoints.length > TRAJECTORY_ACTIVE_EPOCH_CAP) {
+      isBounded = true;
+      activePoints = [
+        activePoints[0],
+        ...activePoints.slice(-(TRAJECTORY_ACTIVE_EPOCH_CAP - 1)),
+      ];
+    }
+    for (const point of activePoints) {
+      upsertPoint(point);
+    }
+  }
+
+  const points = Array.from(byTurn.values()).sort((a, b) => a.turn - b.turn);
+  return {
+    points,
+    totalTurnCount,
+    checkpointCount,
+    isBounded,
+  };
+}
+
+function buildTopTools(rows, anchorIdx, latestPlannerIdx, toolCallsTokens) {
+  if (toolCallsTokens <= 0 || latestPlannerIdx <= anchorIdx) return [];
+
+  const statsByTool = new Map();
+  const ensureTool = (name) => {
+    let entry = statsByTool.get(name);
+    if (!entry) {
+      entry = { calls: 0, weight: 0 };
+      statsByTool.set(name, entry);
+    }
+    return entry;
+  };
+
+  for (let i = anchorIdx; i < latestPlannerIdx; i += 1) {
+    const row = rows[i];
+    if (
+      row.type !== "PLANNER_RESPONSE" ||
+      !Array.isArray(row.tool_calls) ||
+      row.tool_calls.length === 0
+    ) {
+      continue;
+    }
+
+    const genericChars = [];
+    for (let j = i + 1; j <= latestPlannerIdx; j += 1) {
+      const r = rows[j];
+      if (
+        r.type === "PLANNER_RESPONSE" ||
+        r.type === "USER_INPUT" ||
+        r.type === "CHECKPOINT"
+      ) {
+        break;
+      }
+      if (r.type === "SYSTEM_MESSAGE" || r.type === "ERROR_MESSAGE") continue;
+      if (r.type === "GENERIC") {
+        genericChars.push(Math.max(1, estimateRowChars(r)));
+      }
+    }
+
+    const callSizes = row.tool_calls.map((tc) =>
+      Math.max(1, serializedToolCallChars(tc)),
+    );
+
+    if (genericChars.length === row.tool_calls.length) {
+      for (let k = 0; k < row.tool_calls.length; k += 1) {
+        const name = row.tool_calls[k]?.name || "unknown";
+        const entry = ensureTool(name);
+        entry.calls += 1;
+        entry.weight += callSizes[k] + genericChars[k];
+      }
+    } else {
+      const totalGeneric = genericChars.reduce((acc, v) => acc + v, 0);
+      const totalCallSize = callSizes.reduce((acc, v) => acc + v, 0);
+      for (let k = 0; k < row.tool_calls.length; k += 1) {
+        const name = row.tool_calls[k]?.name || "unknown";
+        const entry = ensureTool(name);
+        const genShare =
+          totalCallSize > 0 ? (totalGeneric * callSizes[k]) / totalCallSize : 0;
+        entry.calls += 1;
+        entry.weight += callSizes[k] + genShare;
+      }
+    }
+  }
+
+  const weightMap = Object.fromEntries(
+    Array.from(statsByTool.entries()).map(([name, s]) => [name, s.weight]),
+  );
+  if (Object.keys(weightMap).length === 0) return [];
+
+  const allocated = allocateProportionally(toolCallsTokens, weightMap);
+  return Array.from(statsByTool.entries())
+    .map(([name, s]) => {
+      const estTokens = allocated[name] || 0;
+      const sharePercent =
+        toolCallsTokens > 0
+          ? Math.round((estTokens / toolCallsTokens) * 1000) / 10
+          : 0;
+      return {
+        name,
+        calls: s.calls,
+        estTokens,
+        sharePercent,
+      };
+    })
+    .sort((a, b) => {
+      if (b.estTokens !== a.estTokens) return b.estTokens - a.estTokens;
+      if (b.calls !== a.calls) return b.calls - a.calls;
+      return a.name.localeCompare(b.name);
+    })
+    .slice(0, 10);
+}
+
+export function scanConversationArtifacts(conversationId, paths = resolvePaths()) {
+  if (!isSafeSingleSegment(conversationId)) {
+    return { count: 0, totalBytes: 0, totalEstTokens: 0, items: [] };
+  }
+
+  const convDir = path.join(paths.brainDir, conversationId);
+  const allItems = [];
+  let totalBytes = 0;
+
+  try {
+    for (const dirent of fs.readdirSync(convDir, { withFileTypes: true })) {
+      if (!dirent.name.endsWith(".md")) continue;
+      const fullPath = path.join(convDir, dirent.name);
+      try {
+        const st = fs.statSync(fullPath);
+        if (!st.isFile()) continue;
+
+        const meta = readJsonSafe(`${fullPath}.metadata.json`);
+        const userFacing = Boolean(meta?.userFacing ?? meta?.UserFacing);
+        const rawSummary = meta?.summary ?? meta?.Summary;
+        let summary = null;
+        if (typeof rawSummary === "string") {
+          const collapsed = rawSummary.replace(/\s+/g, " ").trim();
+          if (collapsed) {
+            summary =
+              collapsed.length > 160 ? `${collapsed.slice(0, 159)}…` : collapsed;
+          }
+        }
+
+        totalBytes += st.size;
+        allItems.push({
+          name: dirent.name,
+          bytes: st.size,
+          estTokens: Math.round(st.size / 4),
+          mtimeMs: st.mtimeMs,
+          userFacing,
+          summary,
+        });
+      } catch {
+        // Skip unreadable entries
+      }
+    }
+  } catch {
+    return { count: 0, totalBytes: 0, totalEstTokens: 0, items: [] };
+  }
+
+  allItems.sort((a, b) => {
+    if (b.mtimeMs !== a.mtimeMs) return b.mtimeMs - a.mtimeMs;
+    return a.name.localeCompare(b.name);
+  });
+
+  return {
+    count: allItems.length,
+    totalBytes,
+    totalEstTokens: Math.round(totalBytes / 4),
+    items: allItems.slice(0, 20),
+  };
+}
+
+export function analyzeTranscriptRows(
+  conversationId,
+  rows,
+  mtimeIso,
+  titleOverride,
+  runState,
+  usedFullTranscript,
+  { includeDetails = true, kind = "interactive", annotationTitle = undefined, paths = undefined } = {},
+) {
   let firstUserRow = null;
-  let firstPlannerIdx = -1;
-  let latestPlannerIdx = -1;
-  let lastCheckpointIdx = -1;
-  let checkpointCount = 0;
-  let turnCount = 0;
+  const checkpointIndices = [];
+  const plannerTurns = [];
   let totalOutputTokens = 0;
+  let cumulativeInputTokens = 0;
+  let cumulativeCacheReadTokens = 0;
+  let cacheInvalidationCount = 0;
+  let prevPlannerCacheRead = null;
 
   for (let i = 0; i < rows.length; i += 1) {
     const row = rows[i];
     if (row.type === "USER_INPUT" && !firstUserRow) {
       firstUserRow = row;
     } else if (row.type === "CHECKPOINT") {
-      checkpointCount += 1;
-      lastCheckpointIdx = i;
+      checkpointIndices.push(i);
+      prevPlannerCacheRead = null;
     } else if (row.type === "PLANNER_RESPONSE") {
       const hasTokens =
         typeof row.input_tokens === "number" ||
         typeof row.cache_read_tokens === "number";
-      if (hasTokens) {
-        if (firstPlannerIdx === -1) firstPlannerIdx = i;
-        latestPlannerIdx = i;
-        turnCount += 1;
-      }
+      const outputTokens = typeof row.output_tokens === "number" ? row.output_tokens : 0;
       if (typeof row.output_tokens === "number") {
         totalOutputTokens += row.output_tokens;
+      }
+      if (hasTokens) {
+        const turnInput = Number(row.input_tokens || 0);
+        const turnCacheRead = Number(row.cache_read_tokens || 0);
+        cumulativeInputTokens += turnInput;
+        cumulativeCacheReadTokens += turnCacheRead;
+
+        if (
+          prevPlannerCacheRead !== null &&
+          prevPlannerCacheRead > 0 &&
+          (turnCacheRead === 0 || turnCacheRead <= prevPlannerCacheRead * 0.5)
+        ) {
+          cacheInvalidationCount += 1;
+        }
+        prevPlannerCacheRead = turnCacheRead;
+
+        plannerTurns.push({
+          rowIndex: i,
+          turn: plannerTurns.length + 1,
+          row,
+          inputTokens: turnInput,
+          cacheReadTokens: turnCacheRead,
+          activeTokens: turnInput + turnCacheRead,
+          outputTokens,
+        });
       }
     }
   }
 
-  const annotationTitle = readAnnotationTitle(conversationId);
+  const checkpointCount = checkpointIndices.length;
+  const resolvedAnnotationTitle =
+    annotationTitle !== undefined
+      ? annotationTitle
+      : readAnnotationInfo(conversationId, paths || resolvePaths()).title;
   const requestTitle = extractRequestSnippet(firstUserRow?.content);
   const title =
     titleOverride ||
-    annotationTitle ||
+    resolvedAnnotationTitle ||
     requestTitle ||
     `Thread ${conversationId.slice(0, 8)}`;
 
-  if (latestPlannerIdx === -1) {
+  if (plannerTurns.length === 0) {
     const model = resolveModelInfo(null);
-    return {
+    const emptyResult = {
       conversationId,
       title,
+      kind,
       runState: runState || null,
       model,
       lastUpdated: mtimeIso,
@@ -404,6 +796,9 @@ function analyzeTranscriptRows(conversationId, rows, mtimeIso, titleOverride, ru
         postCheckpointOutputTokens: 0,
         turnCount: 0,
         checkpointCount,
+        cumulativeInputTokens: 0,
+        cumulativeCacheReadTokens: 0,
+        cacheInvalidationCount: 0,
         freeTokens: null,
         freePercent: null,
         usedPercent: null,
@@ -411,15 +806,38 @@ function analyzeTranscriptRows(conversationId, rows, mtimeIso, titleOverride, ru
       segments: [],
       hasUsageData: false,
     };
+    if (includeDetails) {
+      emptyResult.trajectory = {
+        points: [],
+        totalTurnCount: 0,
+        checkpointCount,
+        isBounded: false,
+      };
+      emptyResult.topTools = [];
+    }
+    return emptyResult;
   }
 
-  const firstPlanner = rows[firstPlannerIdx];
-  const latestPlanner = rows[latestPlannerIdx];
+  const firstTurn = plannerTurns[0];
+  const latestTurn = plannerTurns[plannerTurns.length - 1];
+  const firstPlannerIdx = firstTurn.rowIndex;
+  const latestPlannerIdx = latestTurn.rowIndex;
+  const latestPlanner = latestTurn.row;
+  const lastCheckpointIdx =
+    checkpointCount > 0 ? checkpointIndices[checkpointCount - 1] : -1;
 
-  const inputTokens = Number(latestPlanner.input_tokens || 0);
-  const cacheReadTokens = Number(latestPlanner.cache_read_tokens || 0);
-  const activeTokens = inputTokens + cacheReadTokens;
-  const lastOutputTokens = Number(latestPlanner.output_tokens || 0);
+  let effectiveCheckpointIdx = -1;
+  for (let i = checkpointIndices.length - 1; i >= 0; i -= 1) {
+    if (checkpointIndices[i] < latestPlannerIdx) {
+      effectiveCheckpointIdx = checkpointIndices[i];
+      break;
+    }
+  }
+
+  const inputTokens = latestTurn.inputTokens;
+  const cacheReadTokens = latestTurn.cacheReadTokens;
+  const activeTokens = latestTurn.activeTokens;
+  const lastOutputTokens = latestTurn.outputTokens;
   const cacheHitPercent =
     activeTokens > 0 ? Math.round((cacheReadTokens / activeTokens) * 1000) / 10 : 0;
 
@@ -440,96 +858,86 @@ function analyzeTranscriptRows(conversationId, rows, mtimeIso, titleOverride, ru
       : null;
 
   // Honest local category breakdown summing exactly to activeTokens
-  const firstTotal =
-    Number(firstPlanner.input_tokens || 0) +
-    Number(firstPlanner.cache_read_tokens || 0);
+  const firstTotal = firstTurn.activeTokens;
   const firstUserRawEst = Math.round(estimateRowChars(firstUserRow || {}) / 4);
   const firstUserEst = Math.min(firstUserRawEst, Math.floor(firstTotal * 0.6));
   const turn1Baseline = Math.max(0, firstTotal - firstUserEst);
 
   let baselineEst = 0;
-  let checkpointSummaryEst = 0;
+  let checkpointBufferEst = 0;
   let initialMessagesEst = 0;
   let anchorIdx = firstPlannerIdx;
-  let anchorTotal = firstTotal;
+  let anchorTotal = 0;
 
-  if (lastCheckpointIdx >= 0) {
-    let postCpPlannerIdx = -1;
-    for (let i = lastCheckpointIdx + 1; i < rows.length; i += 1) {
-      if (
-        rows[i].type === "PLANNER_RESPONSE" &&
-        (typeof rows[i].input_tokens === "number" ||
-          typeof rows[i].cache_read_tokens === "number")
-      ) {
-        postCpPlannerIdx = i;
-        break;
-      }
-    }
-
-    if (postCpPlannerIdx !== -1) {
-      const postCp = rows[postCpPlannerIdx];
-      const postCpTotal =
-        Number(postCp.input_tokens || 0) +
-        Number(postCp.cache_read_tokens || 0);
-      baselineEst = Math.min(turn1Baseline, postCpTotal, activeTokens);
-      checkpointSummaryEst = Math.min(
-        Math.max(0, postCpTotal - baselineEst),
-        Math.max(0, activeTokens - baselineEst),
-      );
-      anchorIdx = postCpPlannerIdx;
-      anchorTotal = baselineEst + checkpointSummaryEst;
-    } else {
-      baselineEst = Math.min(turn1Baseline, activeTokens);
-      checkpointSummaryEst = 0;
-      anchorIdx = lastCheckpointIdx;
-      anchorTotal = baselineEst;
-    }
-  } else {
+  if (effectiveCheckpointIdx === -1) {
+    anchorIdx = firstPlannerIdx;
     baselineEst = Math.min(turn1Baseline, activeTokens);
     initialMessagesEst = Math.min(firstUserEst, Math.max(0, activeTokens - baselineEst));
-    anchorIdx = firstPlannerIdx;
+    checkpointBufferEst = 0;
     anchorTotal = baselineEst + initialMessagesEst;
+  } else {
+    const postCpTurn = plannerTurns.find((t) => t.rowIndex > effectiveCheckpointIdx);
+    anchorIdx = postCpTurn.rowIndex;
+    const postCpTotal = postCpTurn.activeTokens;
+    baselineEst = Math.min(turn1Baseline, postCpTotal, activeTokens);
+    checkpointBufferEst = Math.min(
+      Math.max(0, postCpTotal - baselineEst),
+      Math.max(0, activeTokens - baselineEst),
+    );
+    initialMessagesEst = 0;
+    anchorTotal = baselineEst + checkpointBufferEst;
   }
 
-  let toolChars = 0;
-  let messageChars = 0;
-  let systemChars = 0;
+  let toolCallChars = 0;
+  let userMessageChars = 0;
+  let agentResponseChars = 0;
+  let systemMessageChars = 0;
 
-  for (let i = anchorIdx + 1; i <= latestPlannerIdx; i += 1) {
+  // A planner turn's output enters prompt context only on subsequent turns ([anchorIdx, latestPlannerIdx))
+  for (let i = anchorIdx; i < latestPlannerIdx; i += 1) {
     const row = rows[i];
-    const chars = Math.max(1, estimateRowChars(row));
-    if (row.type === "GENERIC") {
-      toolChars += chars;
-    } else if (row.type === "USER_INPUT" || row.type === "PLANNER_RESPONSE") {
-      messageChars += chars;
-    } else if (row.type === "SYSTEM_MESSAGE" || row.type === "ERROR_MESSAGE") {
-      systemChars += chars;
-    }
-  }
-
-  // Include anchor turn's own output/tool calls in subsequent growth weight
-  if (latestPlannerIdx > anchorIdx) {
-    const anchorRow = rows[anchorIdx];
-    if (anchorRow && anchorRow.type === "PLANNER_RESPONSE") {
-      messageChars += estimateRowChars(anchorRow);
+    if (row.type === "PLANNER_RESPONSE") {
+      agentResponseChars += estimateAgentTextChars(row);
+      toolCallChars += estimateToolCallsChars(row);
+    } else if (i > anchorIdx) {
+      const chars = Math.max(1, estimateRowChars(row));
+      if (row.type === "GENERIC") {
+        toolCallChars += chars;
+      } else if (row.type === "USER_INPUT") {
+        userMessageChars += chars;
+      } else if (row.type === "SYSTEM_MESSAGE" || row.type === "ERROR_MESSAGE") {
+        systemMessageChars += chars;
+      }
     }
   }
 
   const deltaTokens = Math.max(0, activeTokens - anchorTotal);
-  const deltaWeights =
-    toolChars + messageChars + systemChars > 0
-      ? { toolOutputs: toolChars, messages: messageChars, systemMessages: systemChars }
-      : { toolOutputs: 0, messages: deltaTokens > 0 ? 1 : 0, systemMessages: 0 };
+  const hasWeights =
+    toolCallChars + userMessageChars + agentResponseChars + systemMessageChars > 0;
+  const deltaWeights = hasWeights
+    ? {
+        toolCalls: toolCallChars,
+        userMessages: userMessageChars,
+        agentResponses: agentResponseChars,
+        systemMessages: systemMessageChars,
+      }
+    : {
+        toolCalls: 0,
+        userMessages: 0,
+        agentResponses: deltaTokens > 0 ? 1 : 0,
+        systemMessages: 0,
+      };
 
   const allocated = allocateProportionally(deltaTokens, deltaWeights);
-  const messagesTokens = initialMessagesEst + allocated.messages;
-  const toolOutputsTokens = allocated.toolOutputs;
+  const toolCallsTokens = allocated.toolCalls;
+  const userMessagesTokens = initialMessagesEst + allocated.userMessages;
+  const agentResponsesTokens = allocated.agentResponses;
   const systemMessagesTokens = allocated.systemMessages;
 
   const rawSegments = [
     {
       id: "baseline",
-      label: "System & baseline",
+      label: "System and baseline",
       tokens: baselineEst,
       percent: null,
       colorKey: "blue",
@@ -538,34 +946,44 @@ function analyzeTranscriptRows(conversationId, rows, mtimeIso, titleOverride, ru
         "Local estimate derived from Turn 1 prompt size minus the first user prompt. Covers system prompt, built-in tools, MCP index, rules, and skill headers.",
     },
     {
-      id: "tool_outputs",
-      label: "Tool outputs",
-      tokens: toolOutputsTokens,
+      id: "tool_calls",
+      label: "Tool calls",
+      tokens: toolCallsTokens,
       percent: null,
       colorKey: "orange",
       kind: "estimated",
       detail:
-        lastCheckpointIdx >= 0
-          ? "Local estimate allocating post-checkpoint prompt growth by tool output character share."
-          : "Local estimate allocating prompt growth since Turn 1 by tool output character share.",
+        effectiveCheckpointIdx >= 0
+          ? "Local estimate allocating post-checkpoint prompt growth by tool call arguments and tool output character share."
+          : "Local estimate allocating prompt growth since Turn 1 by tool call arguments and tool output character share.",
     },
     {
-      id: "messages",
-      label: "Messages",
-      tokens: messagesTokens,
+      id: "user_messages",
+      label: "User messages",
+      tokens: userMessagesTokens,
       percent: null,
       colorKey: "green",
       kind: "estimated",
       detail:
-        "Local estimate covering user prompts, assistant replies, thinking summaries, and tool call payloads.",
+        "Local estimate covering user prompt text in the active context window.",
+    },
+    {
+      id: "agent_responses",
+      label: "Agent responses",
+      tokens: agentResponsesTokens,
+      percent: null,
+      colorKey: "amber",
+      kind: "estimated",
+      detail:
+        "Local estimate covering assistant replies and thinking content in the active context window.",
     },
   ];
 
-  if (checkpointSummaryEst > 0) {
+  if (checkpointBufferEst > 0) {
     rawSegments.push({
-      id: "checkpoint_summary",
-      label: "Checkpoint summary",
-      tokens: checkpointSummaryEst,
+      id: "checkpoint_buffer",
+      label: "Checkpoint buffer",
+      tokens: checkpointBufferEst,
       percent: null,
       colorKey: "violet",
       kind: "estimated",
@@ -618,11 +1036,10 @@ function analyzeTranscriptRows(conversationId, rows, mtimeIso, titleOverride, ru
     }
   }
 
-  const segments = rawSegments;
-
-  return {
+  const result = {
     conversationId,
     title,
+    kind,
     runState: runState || null,
     model,
     lastUpdated: latestPlanner.created_at || mtimeIso,
@@ -635,98 +1052,128 @@ function analyzeTranscriptRows(conversationId, rows, mtimeIso, titleOverride, ru
       lastOutputTokens,
       totalOutputTokens,
       postCheckpointOutputTokens,
-      turnCount,
+      turnCount: plannerTurns.length,
       checkpointCount,
+      cumulativeInputTokens,
+      cumulativeCacheReadTokens,
+      cacheInvalidationCount,
       freeTokens,
       freePercent,
       usedPercent: adjustedUsedPercent,
     },
-    segments,
+    segments: rawSegments,
     hasUsageData: true,
   };
+
+  if (includeDetails) {
+    result.trajectory = buildTrajectory(plannerTurns, checkpointIndices);
+    result.topTools = buildTopTools(rows, anchorIdx, latestPlannerIdx, toolCallsTokens);
+  }
+
+  return result;
 }
 
-function summarizeConversationFast(conversationId, transcriptPath, mtimeMs, serviceInfo) {
-  const cached = summaryCache.get(conversationId);
-  if (cached && cached.mtimeMs === mtimeMs) {
-    return {
-      ...cached.summary,
-      title: serviceInfo?.title || cached.summary.title,
-      runState: serviceInfo?.runState || cached.summary.runState,
-    };
-  }
+function summarizeConversationFast(
+  conversationId,
+  transcriptPath,
+  mtimeMs,
+  serviceInfo,
+  paths = resolvePaths(),
+) {
+  const cacheKey = path.resolve(transcriptPath);
+  const cached = summaryCache.get(cacheKey);
+  let base = cached && cached.mtimeMs === mtimeMs ? cached.base : null;
 
-  let firstUserRow = null;
-  let latestPlanner = null;
-  let checkpointCount = 0;
+  if (!base) {
+    let firstUserRow = null;
+    let latestPlanner = null;
+    let checkpointCount = 0;
+    let turnCount = 0;
 
-  try {
-    const text = fs.readFileSync(transcriptPath, "utf8");
-    const lines = text.split("\n");
-    for (let i = 0; i < lines.length; i += 1) {
-      const line = lines[i];
-      if (!line) continue;
-      if (!firstUserRow && line.includes('"USER_INPUT"')) {
-        try {
-          const obj = JSON.parse(line);
-          if (obj.type === "USER_INPUT") firstUserRow = obj;
-        } catch {}
-      } else if (line.includes('"CHECKPOINT"')) {
-        try {
-          const obj = JSON.parse(line);
-          if (obj.type === "CHECKPOINT") checkpointCount += 1;
-        } catch {}
-      } else if (line.includes('"PLANNER_RESPONSE"')) {
-        try {
-          const obj = JSON.parse(line);
-          if (
-            obj.type === "PLANNER_RESPONSE" &&
-            (typeof obj.input_tokens === "number" ||
-              typeof obj.cache_read_tokens === "number")
-          ) {
-            latestPlanner = obj;
-          }
-        } catch {}
+    try {
+      const text = fs.readFileSync(transcriptPath, "utf8");
+      const lines = text.split("\n");
+      for (let i = 0; i < lines.length; i += 1) {
+        const line = lines[i];
+        if (!line) continue;
+        if (!firstUserRow && line.includes('"USER_INPUT"')) {
+          try {
+            const obj = JSON.parse(line);
+            if (obj.type === "USER_INPUT") firstUserRow = obj;
+          } catch {}
+        } else if (line.includes('"CHECKPOINT"')) {
+          try {
+            const obj = JSON.parse(line);
+            if (obj.type === "CHECKPOINT") checkpointCount += 1;
+          } catch {}
+        } else if (line.includes('"PLANNER_RESPONSE"')) {
+          try {
+            const obj = JSON.parse(line);
+            if (
+              obj.type === "PLANNER_RESPONSE" &&
+              (typeof obj.input_tokens === "number" ||
+                typeof obj.cache_read_tokens === "number")
+            ) {
+              latestPlanner = obj;
+              turnCount += 1;
+            }
+          } catch {}
+        }
       }
+    } catch {
+      return null;
     }
-  } catch {
-    return null;
+
+    const activeTokens = latestPlanner
+      ? Number(latestPlanner.input_tokens || 0) +
+        Number(latestPlanner.cache_read_tokens || 0)
+      : 0;
+    const model = resolveModelInfo(latestPlanner?.model || null);
+    const usedPercent =
+      model.contextWindow && activeTokens > 0
+        ? Math.round((activeTokens / model.contextWindow) * 1000) / 10
+        : null;
+
+    base = {
+      requestTitle: extractRequestSnippet(firstUserRow?.content),
+      modelId: model.id,
+      modelName: model.displayName,
+      activeTokens,
+      contextWindow: model.contextWindow,
+      usedPercent,
+      turnCount,
+      checkpointCount,
+      lastUpdated: latestPlanner?.created_at || new Date(mtimeMs).toISOString(),
+    };
+    summaryCache.set(cacheKey, { mtimeMs, base });
   }
 
-  const annotationTitle = readAnnotationTitle(conversationId);
-  const requestTitle = extractRequestSnippet(firstUserRow?.content);
+  // Evaluate annotation outside transcript mtimeMs cache so newly flushed .pbtxt updates kind/title immediately
+  const ann = readAnnotationInfo(conversationId, paths);
+  const kind = classifyConversationKind(ann.exists, serviceInfo);
   const title =
     serviceInfo?.title ||
-    annotationTitle ||
-    requestTitle ||
+    ann.title ||
+    base.requestTitle ||
     `Thread ${conversationId.slice(0, 8)}`;
 
-  const activeTokens = latestPlanner
-    ? Number(latestPlanner.input_tokens || 0) +
-      Number(latestPlanner.cache_read_tokens || 0)
-    : 0;
-  const model = resolveModelInfo(latestPlanner?.model || null);
-  const usedPercent =
-    model.contextWindow && activeTokens > 0
-      ? Math.round((activeTokens / model.contextWindow) * 1000) / 10
-      : null;
-
-  const summary = {
+  return {
     conversationId,
     title,
-    modelId: model.id,
-    modelName: model.displayName,
-    activeTokens,
-    contextWindow: model.contextWindow,
-    usedPercent,
-    checkpointCount,
+    kind,
+    modelId: base.modelId,
+    modelName: base.modelName,
+    activeTokens: base.activeTokens,
+    contextWindow: base.contextWindow,
+    usedPercent: base.usedPercent,
+    turnCount: base.turnCount,
+    checkpointCount: base.checkpointCount,
     runState: serviceInfo?.runState || null,
-    lastUpdated: latestPlanner?.created_at || new Date(mtimeMs).toISOString(),
+    projectId: serviceInfo?.projectId || null,
+    parentConversationId: serviceInfo?.parentConversationId || null,
+    lastUpdated: base.lastUpdated,
     mtimeMs,
   };
-
-  summaryCache.set(conversationId, { mtimeMs, summary });
-  return summary;
 }
 
 function readJsonSafe(filePath) {
@@ -737,10 +1184,113 @@ function readJsonSafe(filePath) {
   }
 }
 
-export function scanLocalInventory() {
+function resolveFileUriWorkspace(uri) {
+  if (typeof uri !== "string" || !uri.startsWith("file://")) return null;
+  try {
+    const fsPath = fileURLToPath(uri);
+    return validateWorkspaceDir(fsPath);
+  } catch {
+    return null;
+  }
+}
+
+function resolveWorkspaceRoot({ workspacePath, mcpRoots, projectId }, paths) {
+  const argWorkspace = validateWorkspaceDir(workspacePath);
+  if (argWorkspace) {
+    return { path: argWorkspace, source: "arg" };
+  }
+
+  if (isSafeSingleSegment(projectId)) {
+    const projectJson = readJsonSafe(path.join(paths.projectsDir, `${projectId}.json`));
+    const resources = projectJson?.projectResources?.resources;
+    if (Array.isArray(resources)) {
+      for (const res of resources) {
+        const uri =
+          res?.gitFolder?.folderUri ||
+          res?.localFolder?.folderUri ||
+          res?.folderUri ||
+          null;
+        const resolved = resolveFileUriWorkspace(uri);
+        if (resolved) {
+          return { path: resolved, source: "project_id" };
+        }
+      }
+    }
+  }
+
+  if (Array.isArray(mcpRoots)) {
+    for (const uri of mcpRoots) {
+      const resolved = resolveFileUriWorkspace(uri);
+      if (resolved) {
+        return { path: resolved, source: "mcp_roots" };
+      }
+    }
+  }
+
+  return { path: null, source: "none" };
+}
+
+function resolveInsideWorkspace(wsRoot, candidatePath) {
+  try {
+    const real = fs.realpathSync(candidatePath);
+    if (real !== wsRoot && !real.startsWith(wsRoot + path.sep)) return null;
+    const st = fs.statSync(real);
+    if (!st.isFile()) return null;
+    return { real, size: st.size };
+  } catch {
+    return null;
+  }
+}
+
+function inspectSkillMetadata(skillMdPath, fallbackName, scope) {
+  let text = "";
+  let fd = null;
+  try {
+    fd = fs.openSync(skillMdPath, "r");
+    const buf = Buffer.allocUnsafe(SKILL_HEAD_READ_BYTES);
+    const bytesRead = fs.readSync(fd, buf, 0, SKILL_HEAD_READ_BYTES, 0);
+    text = buf.toString("utf8", 0, bytesRead);
+  } catch {
+    text = "";
+  } finally {
+    if (fd !== null) {
+      try {
+        fs.closeSync(fd);
+      } catch {}
+    }
+  }
+
+  let headerBytes = Math.min(text.length, 320);
+  let name = fallbackName;
+  const fm = text.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  if (fm) {
+    headerBytes = fm[1].length + 64;
+    const nm = fm[1].match(/^name:\s*(.+)$/m);
+    if (nm) name = nm[1].trim().replace(/^["']|["']$/g, "");
+  }
+  return {
+    name,
+    scope,
+    estIndexTokens: Math.max(12, Math.round(headerBytes / 4)),
+  };
+}
+
+export function scanLocalInventory({
+  workspacePath,
+  mcpRoots,
+  projectId,
+  geminiHome,
+} = {}) {
+  const paths = resolvePaths({ geminiHome });
+  const configJson = readJsonSafe(path.join(paths.configDir, "config.json")) || {};
+  const pluginConfigs =
+    configJson?.plugins && typeof configJson.plugins === "object"
+      ? configJson.plugins
+      : {};
+
   // 1. Discover configured MCP server names from global config + installed plugins
   const configuredServers = new Set();
-  const globalMcp = readJsonSafe(path.join(CONFIG_DIR, "mcp_config.json"));
+  const globalMcp = readJsonSafe(path.join(paths.configDir, "mcp_config.json"));
   if (globalMcp?.mcpServers && typeof globalMcp.mcpServers === "object") {
     for (const [name, cfg] of Object.entries(globalMcp.mcpServers)) {
       if (!cfg?.disabled) configuredServers.add(name);
@@ -751,11 +1301,24 @@ export function scanLocalInventory() {
   const skills = [];
 
   try {
-    for (const entry of fs.readdirSync(PLUGINS_DIR, { withFileTypes: true })) {
+    for (const entry of fs.readdirSync(paths.pluginsDir, { withFileTypes: true })) {
       if (!entry.isDirectory()) continue;
-      const pluginDir = path.join(PLUGINS_DIR, entry.name);
+      const pluginDir = path.join(paths.pluginsDir, entry.name);
       const pluginJson = readJsonSafe(path.join(pluginDir, "plugin.json"));
-      if (pluginJson?.disabled) continue;
+
+      // config.json plugins[dirName].enabled -> plugins[pluginJson.name].enabled -> !pluginJson.disabled
+      let enabled;
+      if (typeof pluginConfigs[entry.name]?.enabled === "boolean") {
+        enabled = pluginConfigs[entry.name].enabled;
+      } else if (
+        pluginJson?.name &&
+        typeof pluginConfigs[pluginJson.name]?.enabled === "boolean"
+      ) {
+        enabled = pluginConfigs[pluginJson.name].enabled;
+      } else {
+        enabled = !pluginJson?.disabled;
+      }
+      if (!enabled) continue;
 
       const pluginMcp = readJsonSafe(path.join(pluginDir, "mcp_config.json"));
       if (pluginMcp?.mcpServers && typeof pluginMcp.mcpServers === "object") {
@@ -781,6 +1344,7 @@ export function scanLocalInventory() {
                 scope: "plugin",
                 bytes: st.size,
                 estTokens: Math.round(st.size / 4),
+                overPerFileCap: st.size > PER_FILE_RULE_BYTE_CAP,
               });
             }
           } catch {}
@@ -804,7 +1368,7 @@ export function scanLocalInventory() {
   }
 
   // Global user skills
-  const globalSkillsDir = path.join(CONFIG_DIR, "skills");
+  const globalSkillsDir = path.join(paths.configDir, "skills");
   try {
     for (const sd of fs.readdirSync(globalSkillsDir, { withFileTypes: true })) {
       if (!sd.isDirectory()) continue;
@@ -817,9 +1381,9 @@ export function scanLocalInventory() {
 
   // Builtin skills
   try {
-    for (const sd of fs.readdirSync(BUILTIN_SKILLS_DIR, { withFileTypes: true })) {
+    for (const sd of fs.readdirSync(paths.builtinSkillsDir, { withFileTypes: true })) {
       if (!sd.isDirectory()) continue;
-      const skillMd = path.join(BUILTIN_SKILLS_DIR, sd.name, "SKILL.md");
+      const skillMd = path.join(paths.builtinSkillsDir, sd.name, "SKILL.md");
       if (fs.existsSync(skillMd)) {
         skills.push(inspectSkillMetadata(skillMd, sd.name, "builtin"));
       }
@@ -829,8 +1393,8 @@ export function scanLocalInventory() {
   // Global rule files
   const rules = [...pluginRules];
   for (const candidate of [
-    { name: "~/.gemini/GEMINI.md", filePath: path.join(GEMINI_HOME, "GEMINI.md"), scope: "global" },
-    { name: "~/.gemini/config/AGENTS.md", filePath: path.join(CONFIG_DIR, "AGENTS.md"), scope: "global" },
+    { name: "~/.gemini/GEMINI.md", filePath: path.join(paths.geminiHome, "GEMINI.md"), scope: "global" },
+    { name: "~/.gemini/config/AGENTS.md", filePath: path.join(paths.configDir, "AGENTS.md"), scope: "global" },
   ]) {
     try {
       const st = fs.statSync(candidate.filePath);
@@ -840,9 +1404,72 @@ export function scanLocalInventory() {
           scope: candidate.scope,
           bytes: st.size,
           estTokens: Math.round(st.size / 4),
+          overPerFileCap: st.size > PER_FILE_RULE_BYTE_CAP,
         });
       }
     } catch {}
+  }
+
+  // Workspace rules and skills
+  const workspace = resolveWorkspaceRoot({ workspacePath, mcpRoots, projectId }, paths);
+  if (workspace.path) {
+    const seenRuleRealPaths = new Set();
+    const seenSkillRealPaths = new Set();
+
+    for (const rootRuleName of ["GEMINI.md", "AGENTS.md"]) {
+      const resolved = resolveInsideWorkspace(
+        workspace.path,
+        path.join(workspace.path, rootRuleName),
+      );
+      if (resolved && !seenRuleRealPaths.has(resolved.real)) {
+        seenRuleRealPaths.add(resolved.real);
+        rules.push({
+          name: rootRuleName,
+          scope: "workspace",
+          bytes: resolved.size,
+          estTokens: Math.round(resolved.size / 4),
+          overPerFileCap: resolved.size > PER_FILE_RULE_BYTE_CAP,
+        });
+      }
+    }
+
+    for (const customDir of WORKSPACE_CUSTOMIZATION_DIRS) {
+      const wsRulesDir = path.join(workspace.path, customDir, "rules");
+      try {
+        for (const rf of fs.readdirSync(wsRulesDir)) {
+          if (!rf.endsWith(".md")) continue;
+          const resolved = resolveInsideWorkspace(
+            workspace.path,
+            path.join(wsRulesDir, rf),
+          );
+          if (resolved && !seenRuleRealPaths.has(resolved.real)) {
+            seenRuleRealPaths.add(resolved.real);
+            rules.push({
+              name: `${customDir}/rules/${rf}`,
+              scope: "workspace",
+              bytes: resolved.size,
+              estTokens: Math.round(resolved.size / 4),
+              overPerFileCap: resolved.size > PER_FILE_RULE_BYTE_CAP,
+            });
+          }
+        }
+      } catch {}
+
+      const wsSkillsDir = path.join(workspace.path, customDir, "skills");
+      try {
+        for (const sd of fs.readdirSync(wsSkillsDir, { withFileTypes: true })) {
+          if (!sd.isDirectory() && !sd.isSymbolicLink()) continue;
+          const resolved = resolveInsideWorkspace(
+            workspace.path,
+            path.join(wsSkillsDir, sd.name, "SKILL.md"),
+          );
+          if (resolved && !seenSkillRealPaths.has(resolved.real)) {
+            seenSkillRealPaths.add(resolved.real);
+            skills.push(inspectSkillMetadata(resolved.real, sd.name, "workspace"));
+          }
+        }
+      } catch {}
+    }
   }
 
   // 2. Scan cached MCP tool schema files under ~/.gemini/antigravity/mcp/
@@ -852,9 +1479,9 @@ export function scanLocalInventory() {
   let totalMcpInstructionBytes = 0;
 
   try {
-    for (const entry of fs.readdirSync(MCP_SCHEMAS_DIR, { withFileTypes: true })) {
+    for (const entry of fs.readdirSync(paths.mcpSchemasDir, { withFileTypes: true })) {
       if (!entry.isDirectory()) continue;
-      const srvDir = path.join(MCP_SCHEMAS_DIR, entry.name);
+      const srvDir = path.join(paths.mcpSchemasDir, entry.name);
       let toolCount = 0;
       let schemaBytes = 0;
       let instructionBytes = 0;
@@ -905,12 +1532,27 @@ export function scanLocalInventory() {
     0,
   );
 
+  // Compute aggregate totals before slicing
+  const totalRuleCount = rules.length;
   const totalRuleTokens = rules.reduce((acc, r) => acc + r.estTokens, 0);
+  rules.sort((a, b) => b.estTokens - a.estTokens || a.name.localeCompare(b.name));
+
+  const totalSkillCount = skills.length;
   const totalSkillIndexTokens = skills.reduce((acc, s) => acc + s.estIndexTokens, 0);
+  const byScope = {
+    workspace: skills.filter((s) => s.scope === "workspace").length,
+    plugin: skills.filter((s) => s.scope.startsWith("plugin:")).length,
+    global: skills.filter((s) => s.scope === "global").length,
+    builtin: skills.filter((s) => s.scope === "builtin").length,
+  };
+  skills.sort(
+    (a, b) => b.estIndexTokens - a.estIndexTokens || a.name.localeCompare(b.name),
+  );
 
   return {
+    workspace,
     mcp: {
-      servers: mcpServers,
+      servers: mcpServers.slice(0, 100),
       activeServerCount: activeMcpServers.length,
       cachedServerCount: mcpServers.length,
       activeToolCount: activeMcpTools,
@@ -920,56 +1562,41 @@ export function scanLocalInventory() {
       instructionEstTokens: Math.round(totalMcpInstructionBytes / 4),
     },
     rules: {
-      items: rules,
-      count: rules.length,
+      items: rules.slice(0, 80),
+      count: totalRuleCount,
       estTokens: totalRuleTokens,
     },
     skills: {
-      count: skills.length,
+      count: totalSkillCount,
       estIndexTokens: totalSkillIndexTokens,
-      byScope: {
-        global: skills.filter((s) => s.scope === "global").length,
-        plugin: skills.filter((s) => s.scope.startsWith("plugin:")).length,
-        builtin: skills.filter((s) => s.scope === "builtin").length,
-      },
-      items: skills
-        .sort((a, b) => b.estIndexTokens - a.estIndexTokens)
-        .slice(0, 60),
+      byScope,
+      items: skills.slice(0, 80),
     },
   };
 }
 
-function inspectSkillMetadata(skillMdPath, fallbackName, scope) {
-  let text = "";
-  try {
-    text = fs.readFileSync(skillMdPath, "utf8");
-  } catch {}
-  let headerBytes = Math.min(text.length, 320);
-  let name = fallbackName;
-  const fm = text.match(/^---\r?\n([\s\S]*?)\r?\n---/);
-  if (fm) {
-    headerBytes = fm[1].length + 64;
-    const nm = fm[1].match(/^name:\s*(.+)$/m);
-    if (nm) name = nm[1].trim().replace(/^["']|["']$/g, "");
-  }
-  return {
-    name,
-    scope,
-    estIndexTokens: Math.max(12, Math.round(headerBytes / 4)),
-  };
-}
-
-export async function getContextSnapshot({ conversationId, limit = 35 } = {}) {
+export async function getContextSnapshot({
+  conversationId,
+  limit = 35,
+  includeSubagents = false,
+  includeDetails = true,
+  workspacePath,
+  mcpRoots,
+  geminiHome,
+} = {}) {
+  const paths = resolvePaths({ geminiHome });
   const safeLimit = Math.max(1, Math.min(100, Number(limit) || 35));
-  const serviceMap = await fetchConversationServiceTitles(Math.max(safeLimit, 50));
+  const { map: serviceMap, status: serviceStatus } = await fetchConversationServiceTitles(200);
 
   const transcriptEntries = [];
+  const seenTranscriptPaths = new Set();
   try {
-    for (const dirent of fs.readdirSync(BRAIN_DIR, { withFileTypes: true })) {
+    for (const dirent of fs.readdirSync(paths.brainDir, { withFileTypes: true })) {
       if (!dirent.isDirectory()) continue;
       const cid = dirent.name;
+      if (!isSafeSingleSegment(cid)) continue;
       const tPath = path.join(
-        BRAIN_DIR,
+        paths.brainDir,
         cid,
         ".system_generated",
         "logs",
@@ -978,6 +1605,8 @@ export async function getContextSnapshot({ conversationId, limit = 35 } = {}) {
       try {
         const st = fs.statSync(tPath);
         if (st.isFile() && st.size > 0) {
+          const resolvedTPath = path.resolve(tPath);
+          seenTranscriptPaths.add(resolvedTPath);
           transcriptEntries.push({
             conversationId: cid,
             transcriptPath: tPath,
@@ -992,36 +1621,83 @@ export async function getContextSnapshot({ conversationId, limit = 35 } = {}) {
     // Brain directory missing
   }
 
+  // Evict deleted brain directories from summaryCache for this brain root
+  const brainPrefix = path.resolve(paths.brainDir) + path.sep;
+  for (const cachedKey of summaryCache.keys()) {
+    if (cachedKey.startsWith(brainPrefix) && !seenTranscriptPaths.has(cachedKey)) {
+      summaryCache.delete(cachedKey);
+    }
+  }
+
   transcriptEntries.sort((a, b) => b.mtimeMs - a.mtimeMs);
 
-  const recentEntries = transcriptEntries.slice(0, safeLimit);
+  const candidateEntries = [];
+  if (includeSubagents) {
+    for (const entry of transcriptEntries) {
+      if (candidateEntries.length >= safeLimit) break;
+      candidateEntries.push(entry);
+    }
+  } else {
+    for (const entry of transcriptEntries) {
+      const pbtxtPath = path.join(paths.annotationsDir, `${entry.conversationId}.pbtxt`);
+      const hasAnnotation = fs.existsSync(pbtxtPath);
+      const kind = classifyConversationKind(
+        hasAnnotation,
+        serviceMap.get(entry.conversationId),
+      );
+      if (kind !== "interactive") continue;
+      candidateEntries.push(entry);
+      if (candidateEntries.length >= safeLimit) break;
+    }
+  }
+
   const conversations = [];
-  for (const entry of recentEntries) {
+  for (const entry of candidateEntries) {
     const summary = summarizeConversationFast(
       entry.conversationId,
       entry.transcriptPath,
       entry.mtimeMs,
       serviceMap.get(entry.conversationId),
+      paths,
     );
     if (summary) conversations.push(summary);
   }
 
+  const validRequestedId = isSafeSingleSegment(conversationId);
   let selectedEntry = null;
-  if (conversationId) {
-    selectedEntry =
-      transcriptEntries.find((e) => e.conversationId === conversationId) || null;
+  let requestedConversationFound = true;
+
+  if (conversationId !== undefined && conversationId !== null && conversationId !== "") {
+    if (!validRequestedId) {
+      requestedConversationFound = false;
+    } else {
+      selectedEntry =
+        transcriptEntries.find((e) => e.conversationId === conversationId) || null;
+      if (!selectedEntry) {
+        requestedConversationFound = false;
+      }
+    }
+  } else if (conversationId === "") {
+    requestedConversationFound = false;
   }
-  if (!selectedEntry && transcriptEntries.length > 0) {
-    selectedEntry = transcriptEntries[0];
+
+  if (!selectedEntry) {
+    selectedEntry = candidateEntries[0] || transcriptEntries[0] || null;
   }
 
   let current = null;
+  let selectedProjectId = null;
   if (selectedEntry) {
     const { rows, usedFullTranscript } = loadBestTranscriptRows(
       selectedEntry.conversationId,
       selectedEntry.transcriptPath,
+      paths,
     );
     const svc = serviceMap.get(selectedEntry.conversationId);
+    const ann = readAnnotationInfo(selectedEntry.conversationId, paths);
+    const selectedKind = classifyConversationKind(ann.exists, svc);
+    selectedProjectId = svc?.projectId || null;
+
     current = analyzeTranscriptRows(
       selectedEntry.conversationId,
       rows,
@@ -1029,16 +1705,33 @@ export async function getContextSnapshot({ conversationId, limit = 35 } = {}) {
       svc?.title || null,
       svc?.runState || null,
       usedFullTranscript,
+      {
+        includeDetails,
+        kind: selectedKind,
+        annotationTitle: ann.title,
+        paths,
+      },
     );
+    if (includeDetails) {
+      current.artifacts = scanConversationArtifacts(selectedEntry.conversationId, paths);
+    }
   }
 
-  const inventory = scanLocalInventory();
+  const resolvedMcpRoots = await mcpRoots;
+  const inventory = scanLocalInventory({
+    workspacePath,
+    mcpRoots: resolvedMcpRoots,
+    projectId: selectedProjectId,
+    geminiHome,
+  });
 
   return {
+    schemaVersion: 2,
     generatedAt: new Date().toISOString(),
+    serviceStatus,
     totalTrackedConversations: transcriptEntries.length,
     selectedConversationId: current?.conversationId || null,
-    requestedConversationFound: conversationId ? Boolean(selectedEntry && selectedEntry.conversationId === conversationId) : true,
+    requestedConversationFound,
     current,
     conversations,
     inventory,
