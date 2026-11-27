@@ -71,6 +71,8 @@ const callQueue = [];
 
 let activeTrajectoryCoords = null;
 let activeTrajectoryIndex = null;
+let activeTrajectoryScrubbing = false;
+let activeTrajectoryDragPointerId = null;
 let isTrajectoryPointerScrubbing = false;
 let isTrajectoryKeyScrubbing = false;
 let openTipCount = 0;
@@ -400,7 +402,12 @@ function computeStructureKey(snapshot, error) {
       .filter((s) => s.tokens > 0)
       .map((s) => s.id),
     trajKey: current?.trajectory
-      ? [trajPoints.length, lastTraj?.turn, lastTraj?.activeTokens]
+      ? [
+          trajPoints.length,
+          lastTraj?.turn,
+          lastTraj?.activeTokens,
+          lastTraj?.cacheReadTokens,
+        ]
       : "none",
     topToolNames: (current?.topTools || []).map((t) => t.name),
     artifactNames: (current?.artifacts?.items || []).map((a) => a.name),
@@ -518,27 +525,60 @@ function setHighlight(segId) {
 function updateTrajectoryScrub(idx, { scrubbing = false } = {}) {
   if (!activeTrajectoryCoords || activeTrajectoryCoords.length === 0) return;
   const clamped = Math.max(0, Math.min(activeTrajectoryCoords.length - 1, idx));
+  if (clamped === activeTrajectoryIndex && scrubbing === activeTrajectoryScrubbing) {
+    return;
+  }
   activeTrajectoryIndex = clamped;
+  activeTrajectoryScrubbing = scrubbing;
   const target = activeTrajectoryCoords[clamped];
   const readoutText = formatTrajectoryReadout(target.pt);
   const readoutEl = rootEl.querySelector('[data-slot="traj-readout"]');
   const dotEl = rootEl.querySelector('[data-slot="traj-active-dot"]');
+  const cacheDotEl = rootEl.querySelector('[data-slot="traj-cache-dot"]');
   const crosshairEl = rootEl.querySelector('[data-slot="traj-crosshair"]');
   const scrubberEl = rootEl.querySelector('[data-slot="traj-scrubber"]');
-  if (readoutEl) readoutEl.textContent = readoutText;
+  const activeState = scrubbing ? "true" : "false";
+  if (readoutEl) {
+    readoutEl.textContent = readoutText;
+    readoutEl.dataset.scrubbing = activeState;
+  }
   if (dotEl) {
-    dotEl.setAttribute("cx", target.x.toFixed(1));
-    dotEl.setAttribute("cy", target.yActive.toFixed(1));
+    dotEl.style.left = `${target.xPct.toFixed(2)}%`;
+    dotEl.style.top = `${target.yActivePct.toFixed(2)}%`;
+    dotEl.dataset.active = activeState;
+  }
+  if (cacheDotEl) {
+    cacheDotEl.style.left = `${target.xPct.toFixed(2)}%`;
+    cacheDotEl.style.top = `${target.yCachePct.toFixed(2)}%`;
+    cacheDotEl.dataset.active = activeState;
   }
   if (crosshairEl) {
     const xStr = target.x.toFixed(1);
     crosshairEl.setAttribute("x1", xStr);
     crosshairEl.setAttribute("x2", xStr);
-    crosshairEl.setAttribute("data-active", scrubbing ? "true" : "false");
+    crosshairEl.setAttribute("data-active", activeState);
   }
   if (scrubberEl) {
     scrubberEl.setAttribute("aria-valuenow", String(clamped + 1));
     scrubberEl.setAttribute("aria-valuetext", readoutText);
+  }
+}
+
+function resetTrajectoryScrub({
+  flushPending = true,
+  nextActiveEl = document.activeElement,
+} = {}) {
+  isTrajectoryPointerScrubbing = false;
+  isTrajectoryKeyScrubbing = false;
+  activeTrajectoryDragPointerId = null;
+  if (activeTrajectoryCoords && activeTrajectoryCoords.length > 0) {
+    updateTrajectoryScrub(activeTrajectoryCoords.length - 1, { scrubbing: false });
+  } else {
+    activeTrajectoryScrubbing = false;
+  }
+  if (flushPending && pendingStructuralRender && !isUserInteracting(nextActiveEl)) {
+    pendingStructuralRender = false;
+    render();
   }
 }
 
@@ -1364,6 +1404,8 @@ function render() {
   lastRenderedFingerprint = computeSnapshotFingerprint(currentSnapshot);
   highlightedSegId = null;
   activeTrajectoryIndex = null;
+  activeTrajectoryScrubbing = false;
+  activeTrajectoryDragPointerId = null;
   isTrajectoryPointerScrubbing = false;
   isTrajectoryKeyScrubbing = false;
 
@@ -1646,7 +1688,75 @@ function bindDelegatedEvents() {
     }
   };
 
+  const finishTrajectoryDrag = (event, { cancelled = false } = {}) => {
+    if (
+      activeTrajectoryDragPointerId !== null &&
+      event.pointerId !== undefined &&
+      event.pointerId !== activeTrajectoryDragPointerId
+    ) {
+      return;
+    }
+    const hadDrag = activeTrajectoryDragPointerId !== null;
+    const scrubber = rootEl.querySelector('[data-slot="traj-scrubber"]');
+    if (hadDrag && scrubber && event.pointerId !== undefined) {
+      try {
+        if (scrubber.hasPointerCapture?.(event.pointerId)) {
+          scrubber.releasePointerCapture(event.pointerId);
+        }
+      } catch {}
+    }
+    activeTrajectoryDragPointerId = null;
+
+    if (!hadDrag && !isTrajectoryPointerScrubbing) return;
+
+    if (!cancelled && event.pointerType === "mouse" && scrubber) {
+      const rect = scrubber.getBoundingClientRect();
+      const inside =
+        event.clientX >= rect.left &&
+        event.clientX <= rect.right &&
+        event.clientY >= rect.top &&
+        event.clientY <= rect.bottom;
+      if (inside) {
+        scrubFromPointerEvent(event, scrubber);
+        return;
+      }
+    }
+
+    isTrajectoryPointerScrubbing = false;
+    if (!isTrajectoryKeyScrubbing && activeTrajectoryCoords) {
+      updateTrajectoryScrub(activeTrajectoryCoords.length - 1, { scrubbing: false });
+    }
+    if (pendingStructuralRender && !isUserInteracting()) {
+      pendingStructuralRender = false;
+      render();
+    }
+  };
+
   rootEl.addEventListener("pointerdown", (event) => {
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+    const scrubber = target.closest('[data-slot="traj-scrubber"]');
+    if (!(scrubber instanceof Element)) return;
+    if (!event.isPrimary || (event.pointerType === "mouse" && event.button !== 0)) {
+      return;
+    }
+    activeTrajectoryDragPointerId = event.pointerId;
+    try {
+      scrubber.setPointerCapture?.(event.pointerId);
+    } catch {}
+    scrubFromPointerEvent(event, scrubber);
+  });
+
+  rootEl.addEventListener("pointermove", (event) => {
+    if (activeTrajectoryDragPointerId !== null) {
+      if (event.pointerId !== activeTrajectoryDragPointerId) return;
+      const scrubber = rootEl.querySelector('[data-slot="traj-scrubber"]');
+      if (scrubber) {
+        scrubFromPointerEvent(event, scrubber);
+      }
+      return;
+    }
+    if (event.pointerType !== "mouse") return;
     const target = event.target;
     if (!(target instanceof Element)) return;
     const scrubber = target.closest('[data-slot="traj-scrubber"]');
@@ -1655,13 +1765,8 @@ function bindDelegatedEvents() {
     }
   });
 
-  rootEl.addEventListener("pointermove", (event) => {
-    const target = event.target;
-    if (!(target instanceof Element)) return;
-    const scrubber = target.closest('[data-slot="traj-scrubber"]');
-    if (scrubber instanceof Element) {
-      scrubFromPointerEvent(event, scrubber);
-    }
+  rootEl.addEventListener("pointerup", (event) => {
+    finishTrajectoryDrag(event, { cancelled: false });
   });
 
   rootEl.addEventListener("pointerover", (event) => {
@@ -1681,6 +1786,7 @@ function bindDelegatedEvents() {
 
     const scrubber = target.closest('[data-slot="traj-scrubber"]');
     if (scrubber) {
+      if (activeTrajectoryDragPointerId !== null) return;
       const related = event.relatedTarget;
       if (!(related instanceof Element) || !related.closest('[data-slot="traj-scrubber"]')) {
         isTrajectoryPointerScrubbing = false;
@@ -1708,15 +1814,36 @@ function bindDelegatedEvents() {
     setHighlight(null);
   });
 
-  rootEl.addEventListener("pointercancel", () => {
-    if (!isTrajectoryPointerScrubbing) return;
-    isTrajectoryPointerScrubbing = false;
-    if (!isTrajectoryKeyScrubbing && activeTrajectoryCoords) {
-      updateTrajectoryScrub(activeTrajectoryCoords.length - 1, { scrubbing: false });
+  rootEl.addEventListener("pointercancel", (event) => {
+    finishTrajectoryDrag(event, { cancelled: true });
+  });
+
+  rootEl.addEventListener("lostpointercapture", (event) => {
+    finishTrajectoryDrag(event, { cancelled: true });
+  });
+
+  document.documentElement.addEventListener("pointerleave", () => {
+    if (activeTrajectoryDragPointerId !== null) return;
+    if (isTrajectoryPointerScrubbing) {
+      isTrajectoryPointerScrubbing = false;
+      if (!isTrajectoryKeyScrubbing && activeTrajectoryCoords) {
+        updateTrajectoryScrub(activeTrajectoryCoords.length - 1, { scrubbing: false });
+      }
+      if (pendingStructuralRender && !isUserInteracting()) {
+        pendingStructuralRender = false;
+        render();
+      }
     }
-    if (pendingStructuralRender && !isUserInteracting()) {
-      pendingStructuralRender = false;
-      render();
+  });
+
+  window.addEventListener("blur", () => {
+    if (
+      isTrajectoryPointerScrubbing ||
+      isTrajectoryKeyScrubbing ||
+      activeTrajectoryScrubbing ||
+      activeTrajectoryDragPointerId !== null
+    ) {
+      resetTrajectoryScrub({ flushPending: true });
     }
   });
 
@@ -1743,13 +1870,10 @@ function bindDelegatedEvents() {
     if (!(target instanceof Element)) return;
 
     if (target.closest('[data-slot="traj-scrubber"]')) {
-      isTrajectoryKeyScrubbing = false;
-      if (!isTrajectoryPointerScrubbing && activeTrajectoryCoords) {
-        updateTrajectoryScrub(activeTrajectoryCoords.length - 1, { scrubbing: false });
-      }
-      if (pendingStructuralRender && !isUserInteracting(event.relatedTarget)) {
-        pendingStructuralRender = false;
-        render();
+      if (activeTrajectoryDragPointerId === null) {
+        resetTrajectoryScrub({ flushPending: true, nextActiveEl: event.relatedTarget });
+      } else {
+        isTrajectoryKeyScrubbing = false;
       }
       return;
     }
@@ -1814,9 +1938,14 @@ function bindDelegatedEvents() {
         updateTrajectoryScrub(nextIdx, { scrubbing: true });
         return;
       }
-      if (event.key === "Escape") {
-        isTrajectoryKeyScrubbing = false;
-        updateTrajectoryScrub(len - 1, { scrubbing: false });
+      if (
+        event.key === "Escape" &&
+        activeTrajectoryDragPointerId === null &&
+        (isTrajectoryKeyScrubbing || isTrajectoryPointerScrubbing || activeTrajectoryScrubbing)
+      ) {
+        event.preventDefault();
+        resetTrajectoryScrub({ flushPending: false });
+        return;
       }
     }
 

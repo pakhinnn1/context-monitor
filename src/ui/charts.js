@@ -35,7 +35,10 @@ export function computeTrajectoryGeometry(trajectory, contextWindow) {
     const clampedCache = Math.max(0, Math.min(pt.cacheReadTokens, maxY));
     const yActive = PLOT_H - (clampedActive / maxY) * PLOT_H;
     const yCache = PLOT_H - (clampedCache / maxY) * PLOT_H;
-    return { x, yActive, yCache, pt, idx: i };
+    const xPct = (x / PLOT_W) * 100;
+    const yActivePct = (yActive / PLOT_H) * 100;
+    const yCachePct = (yCache / PLOT_H) * 100;
+    return { x, yActive, yCache, xPct, yActivePct, yCachePct, pt, idx: i };
   });
 
   return { coords, maxY };
@@ -141,15 +144,12 @@ export function renderTrajectoryChart(trajectory, contextWindow, activeIdx = nul
       cpLines.push(
         `<line class="traj-cp-line" x1="${lineX}" y1="0" x2="${lineX}" y2="${baseLineY}" />`,
       );
-      const r = 4;
-      const cx = c.x.toFixed(1);
-      const cy = c.yActive.toFixed(1);
       milestoneMarkers.push(
-        `<polygon class="traj-cp-peak" points="${cx},${Number(cy) - r} ${Number(cx) + r},${cy} ${cx},${Number(cy) + r} ${Number(cx) - r},${cy}" />`,
+        `<span class="traj-cp-peak" aria-hidden="true" style="left:${c.xPct.toFixed(2)}%;top:${c.yActivePct.toFixed(2)}%"></span>`,
       );
     } else if (c.pt.kind === "checkpoint_baseline") {
       milestoneMarkers.push(
-        `<circle class="traj-cp-base" cx="${c.x.toFixed(1)}" cy="${c.yActive.toFixed(1)}" r="3.5" />`,
+        `<span class="traj-cp-base" aria-hidden="true" style="left:${c.xPct.toFixed(2)}%;top:${c.yActivePct.toFixed(2)}%"></span>`,
       );
     }
   }
@@ -165,7 +165,7 @@ export function renderTrajectoryChart(trajectory, contextWindow, activeIdx = nul
 
   return `
     <div class="traj-wrap">
-      <div class="traj-readout" data-slot="traj-readout">${escapeHtml(readoutText)}</div>
+      <div class="traj-readout" data-slot="traj-readout" data-scrubbing="${isScrubbing ? "true" : "false"}">${escapeHtml(readoutText)}</div>
       <div class="traj-chart">
         <div class="traj-y-axis" aria-hidden="true">${yLabelsHtml}</div>
         <div
@@ -181,16 +181,17 @@ export function renderTrajectoryChart(trajectory, contextWindow, activeIdx = nul
           aria-valuenow="${focusIdx + 1}"
           aria-valuetext="${escapeHtml(readoutText)}"
         >
-          <svg class="traj-svg" viewBox="0 0 ${SVG_W} ${SVG_H}" aria-hidden="true" focusable="false">
+          <svg class="traj-svg" viewBox="0 0 ${SVG_W} ${SVG_H}" preserveAspectRatio="none" aria-hidden="true" focusable="false">
             ${gridLinesHtml}
             ${thresholdHtml}
             <path class="traj-cache-area" d="${cacheAreaPath}" />
             ${cpLines.join("")}
             <polyline class="traj-active-line" points="${activePoly}" />
-            ${milestoneMarkers.join("")}
             <line class="traj-crosshair" data-slot="traj-crosshair" data-active="${isScrubbing ? "true" : "false"}" x1="${focusCoord.x.toFixed(1)}" y1="0" x2="${focusCoord.x.toFixed(1)}" y2="${PLOT_H}" />
-            <circle class="traj-active-dot" data-slot="traj-active-dot" cx="${focusCoord.x.toFixed(1)}" cy="${focusCoord.yActive.toFixed(1)}" r="4" />
           </svg>
+          ${milestoneMarkers.join("")}
+          <span class="traj-cache-dot" data-slot="traj-cache-dot" data-active="${isScrubbing ? "true" : "false"}" aria-hidden="true" style="left:${focusCoord.xPct.toFixed(2)}%;top:${focusCoord.yCachePct.toFixed(2)}%"></span>
+          <span class="traj-active-dot" data-slot="traj-active-dot" data-active="${isScrubbing ? "true" : "false"}" aria-hidden="true" style="left:${focusCoord.xPct.toFixed(2)}%;top:${focusCoord.yActivePct.toFixed(2)}%"></span>
           ${thresholdLabelHtml}
         </div>
         <div class="traj-x-axis" aria-hidden="true">
