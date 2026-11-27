@@ -1,7 +1,7 @@
 # Context Monitor v0.2: Metrics and Inventory v2 (Spec 1)
 
 *   **Author:** pakhinnn1
-*   **Status:** Proposed
+*   **Status:** Implemented (Pending Plugin Sync)
 *   **Date:** 2026-11-27
 
 --------------------------------------------------------------------------------
@@ -221,7 +221,7 @@ Post-anchor attribution and session counters:
 `current.topTools` ranks the tools driving the `tool_calls` segment inside the active post-anchor window (`toolCallsTokens` equals the `tool_calls` segment's `tokens`):
 
 1.  If `toolCallsTokens === 0` or `latestPlannerIdx <= anchorIdx` (e.g., 1-turn threads or the first turn after a checkpoint, because a turn's own tool calls are not part of its own input prompt), return `[]`.
-2.  For each `PLANNER_RESPONSE` row in `[anchorIdx, latestPlannerIdx]` with non-empty `tool_calls` (verified item keys `{ name, args }`), collect subsequent `GENERIC` rows up to `latestPlannerIdx` inclusive, stopping at the next `PLANNER_RESPONSE`, `USER_INPUT`, or `CHECKPOINT` (skipping intervening `SYSTEM_MESSAGE` or `ERROR_MESSAGE` rows rather than halting the batch).
+2.  For each `PLANNER_RESPONSE` row in `[anchorIdx, latestPlannerIdx)` with non-empty `tool_calls` (verified item keys `{ name, args }`), collect subsequent `GENERIC` rows up to `latestPlannerIdx` inclusive, stopping at the next `PLANNER_RESPONSE`, `USER_INPUT`, or `CHECKPOINT` (skipping intervening `SYSTEM_MESSAGE` or `ERROR_MESSAGE` rows rather than halting the batch).
 3.  Pair `GENERIC` outputs positionally when counts match `tool_calls.length`; otherwise allocate summed `GENERIC` chars across `tool_calls` proportionally by `max(1, serialized tool-call JSON chars)`, adding each call's own serialized tool-call JSON chars.
 4.  Aggregate raw weights by tool name (defaulting missing names to `"unknown"`), allocate `toolCallsTokens` proportionally, compute `sharePercent` to one decimal place, sort by `estTokens` descending, then `calls` descending, then `name` ascending, and return the top `10` entries `{ name, calls, estTokens, sharePercent }`.
 
@@ -235,12 +235,12 @@ For the selected validated `conversationId`, perform a non-recursive regular `*.
 
 ### True Plugin Precedence, Workspace Discovery, and Inventory (`inventory`)
 
-`scanLocalInventory({ workspacePath, mcpRoots, projectId })` resolves plugin enablement and active workspace customizations:
+`scanLocalInventory({ workspacePath, mcpRoots, projectId, geminiHome } = {})` resolves plugin enablement and active workspace customizations:
 
 1.  **Plugin enablement precedence:** Read `~/.gemini/config/config.json` safely (treating missing or malformed JSON as `{}`). For each plugin directory, resolve `enabled` from `configJson.plugins[dirName].enabled`, falling back to `configJson.plugins[pluginJson.name].enabled`, and then `!pluginJson.disabled`. Apply consistently across MCP servers, plugin rules, and plugin skills.
 2.  **Workspace resolution:** Resolve at most one active workspace root in priority order, validating directories (must resolve to an existing directory and not `/` or `os.homedir()`) and falling through to the next source if an explicit argument fails validation:
     *   Explicit `workspacePath` argument (`source: "arg"`).
-    *   Selected conversation's `projectId` (available only when `ConversationService` enrichment succeeded) matched directly at `~/.gemini/config/projects/<projectId>.json` (after validating `projectId` contains no path separators), reading the first valid `file://` URI from `projectResources.resources[].gitFolder.folderUri` or `localFolder.folderUri` (`source: "project_id"`).
+    *   Selected conversation's `projectId` (available only when `ConversationService` enrichment succeeded) matched directly at `~/.gemini/config/projects/<projectId>.json` (after validating `projectId` contains no path separators), reading the first valid `file://` URI from `projectResources.resources[].gitFolder.folderUri`, `localFolder.folderUri`, or direct `folderUri` (`source: "project_id"`).
     *   Valid `file://` URIs passed from MCP `roots/list`, guarding URI-to-path decoding per entry so one malformed URI does not discard valid subsequent URIs (`source: "mcp_roots"`).
     *   Otherwise `workspace = { path: null, source: "none" }`.
 3.  **Workspace rules, skills, and bounds:**
@@ -337,32 +337,32 @@ Load these skills at the start of the implementation session before editing any 
 
 Note: `plugin.json` is excluded from Spec 1 edits because release version strings stay at `0.1.0` until Spec 2 ships (`package.json` updates only `"scripts.test"`, keeping `"version": "0.1.0"`).
 
-#### 1. `src/analyzer.mjs` (Modify)
+#### 1. [`src/analyzer.mjs`](../../src/analyzer.mjs) (Modify)
 
 *   **Type / Scope**: Core local transcript analyzer and workspace/plugin inventory scanner.
 *   **Rationale**: Implements v2 classification, CLI-aligned `segments`, `trajectory`, `topTools`, `artifacts`, cumulative counters, `ConversationService` status, `config.json` plugin precedence, and workspace customization scanning.
 *   **Proposed Changes**:
-    1.  **Dynamic `resolvePaths({ geminiHome } = {})` refactor**: Replace all module-level path constants (`GEMINI_HOME`, `ANTIGRAVITY_DIR`, `BRAIN_DIR`, `ANNOTATIONS_DIR`, `MCP_SCHEMAS_DIR`, `CONFIG_DIR`, `PLUGINS_DIR`, `BUILTIN_SKILLS_DIR`) with `resolvePaths({ geminiHome } = {})` reading `geminiHome || process.env.CONTEXT_MONITOR_GEMINI_HOME || path.join(os.homedir(), ".gemini")` so `readAnnotationTitle`, `loadBestTranscriptRows`, `scanConversationArtifacts`, `scanLocalInventory`, and `getContextSnapshot` resolve against isolated test fixtures.
+    1.  **Dynamic `resolvePaths({ geminiHome } = {})` refactor**: Replace all module-level path constants (`GEMINI_HOME`, `ANTIGRAVITY_DIR`, `BRAIN_DIR`, `ANNOTATIONS_DIR`, `MCP_SCHEMAS_DIR`, `CONFIG_DIR`, `PLUGINS_DIR`, `BUILTIN_SKILLS_DIR`) with `resolvePaths({ geminiHome } = {})` reading `geminiHome || process.env.CONTEXT_MONITOR_GEMINI_HOME || path.join(os.homedir(), ".gemini")` so `readAnnotationInfo(conversationId, paths = resolvePaths())` (returning `{ exists, title }`), `loadBestTranscriptRows`, `scanConversationArtifacts`, `scanLocalInventory`, and `getContextSnapshot` resolve against isolated test fixtures.
     2.  **`fetchConversationServiceTitles(maxCount = 200)`**: Implement `ListConversations` (`pageSize: 100`, `pageToken`, `includeArchived: false`, 2 pages max within `350 ms`), extracting `projectId`, `parentConversationId`, and `rootConversationId` from `conv.metadata`, `"partial"` page-1 retention, and `{ map, status }` return value (updating the destructuring call site in `getContextSnapshot`, without any 15s/30s cache).
     3.  **Validation, annotation gating, and `summaryCache`**:
         *   Add `isSafeSingleSegment(id)` rejecting empty strings, `/`, `\`, `..`, and null bytes; apply it to `conversationId` and `projectId` before touching disk.
         *   Key `summaryCache` by resolved `transcriptPath`, evict deleted entries on scan, evaluate `~/.gemini/antigravity/annotations/<id>.pbtxt` outside transcript `mtimeMs` hits, and store `turnCount` in summary entries.
         *   For default `getContextSnapshot` (`includeSubagents: false`), filter candidate directories via `.pbtxt` + `serviceMap` before reading transcript bodies so synchronous reads stay bounded to top `limit` (plus any valid explicit `conversationId`); when `includeSubagents: true`, parse top `limit` transcripts by `mtimeMs` without skipping large compact `transcript.jsonl` files. Classify `"subagent"` only when `serviceInfo?.parentConversationId` is non-empty.
     4.  **`analyzeTranscriptRows` v2 extensions (export `analyzeTranscriptRows` and `scanConversationArtifacts`)**:
-        *   Signature: `analyzeTranscriptRows(conversationId, rows, mtimeIso, titleOverride, runState, usedFullTranscript, { includeDetails = true, kind = "interactive", annotationTitle = undefined } = {})`.
+        *   Signature: `analyzeTranscriptRows(conversationId, rows, mtimeIso, titleOverride, runState, usedFullTranscript, { includeDetails = true, kind = "interactive", annotationTitle = undefined, paths = undefined } = {})`.
         *   **Segments & anchor math**: Compute `effectiveCheckpointIdx` (largest `CHECKPOINT` index `< latestPlannerIdx`, else `-1`). Implement both anchor branches (`effectiveCheckpointIdx === -1` and `>= 0`), six CLI-aligned `segments` with `kind: "estimated"` and `detail` tooltip descriptions, `user_messages = initialMessagesEst + allocated.userMessages`, `rows[anchorIdx]` split (`content + thinking` vs non-empty `tool_calls` with no `1`-char floor on empty arrays) only when `latestPlannerIdx > anchorIdx`, and `agent_responses` zero-weight fallback.
         *   **Cumulative counters**: Initialize `exact.cumulativeInputTokens`, `exact.cumulativeCacheReadTokens`, and `exact.cacheInvalidationCount` (including `0` defaults when `latestPlannerIdx === -1`), applying the consecutive non-checkpoint `cacheInvalidationCount` rule.
         *   **`trajectory` (`includeDetails: true`)**: Populate `points` (`stepIndex` from `typeof row.step_index === "number" ? row.step_index : rowIndex`, `totalTurnCount: exact.turnCount`), kind precedence, `activeEpoch` for both `checkpointCount === 0` (`1..N` tagged `"turn"`) and `checkpointCount > 0` (`activeEpoch[0]` tagged `"checkpoint_baseline"`), trailing-checkpoint peak handling, and `> 120` active-epoch cap (`activeEpoch[0]` + last `119`, `isBounded: true`).
         *   **`topTools` (`includeDetails: true`)**: Return `[]` immediately when `toolCallsTokens === 0 || latestPlannerIdx <= anchorIdx`; scan `GENERIC` rows bounded to `j <= latestPlannerIdx` (stopping at `PLANNER_RESPONSE` / `USER_INPUT` / `CHECKPOINT` and skipping `SYSTEM_MESSAGE` / `ERROR_MESSAGE`), apply positional vs `max(1, serializedToolCallChars(tc))` weighting, and tie-break by `name` ascending.
         *   **`scanConversationArtifacts(conversationId, paths)`**: Validate `conversationId` via `isSafeSingleSegment`, perform non-recursive top-level `*.md` scan sorted by `mtimeMs` descending (`{ name, bytes, estTokens, mtimeMs, userFacing, summary }`), read `<name>.metadata.json` (`Boolean(meta.userFacing ?? meta.UserFacing)` with `false` default; `typeof (meta.summary ?? meta.Summary) === "string"` collapsed to single-line whitespace and truncated to 160 chars, `null` default), and aggregate totals across all matching files before slicing top `20`.
         *   When `includeDetails` is `false`, omit `trajectory`, `topTools`, and `artifacts` from `current`.
-    5.  **`scanLocalInventory({ workspacePath, mcpRoots, projectId } = {})`**:
+    5.  **`scanLocalInventory({ workspacePath, mcpRoots, projectId, geminiHome } = {})`**:
         *   Apply `config.json` `plugins[entry.name]?.enabled ?? plugins[pluginJson?.name]?.enabled ?? !pluginJson?.disabled` across MCP, rules, and skills.
         *   Extract a shared `validateWorkspaceDir(candidatePath)` helper (rejecting non-directories, `/`, and `os.homedir()` via `fs.realpathSync`) and export it for `server.mjs`. Resolve workspace in priority order (`workspacePath` -> `projectId` via direct `projects/<projectId>.json` lookup, falling through on missing/invalid `projectId` -> `mcpRoots` with per-URI `url.fileURLToPath` `try/catch`).
         *   Scan workspace rules and skills across `GEMINI.md`, `AGENTS.md`, `.agents`, `.agent`, `_agents`, and `_agent`, deduplicating via `realpathSync` with symlink-escape guards, setting uniform `overPerFileCap` across all rule scopes, sorting `rules.items` by `estTokens` descending then `name` ascending pre-slice, computing `rules` and `mcp` aggregate totals pre-slice, adding `workspace` to `inventory.skills.byScope`, capping `rules.items` (80), `skills.items` (80), and `mcp.servers` (100), and bounding `inspectSkillMetadata` reads to `4 KiB` (no inventory cache).
-    6.  **`getContextSnapshot`**: Accept `includeDetails = true` (passing it to `analyzeTranscriptRows` and gating `scanConversationArtifacts`), enforce `isSafeSingleSegment(conversationId)` (setting `requestedConversationFound: false` on invalid IDs without reading outside `brain/`/`annotations/`), implement zero-interactive fallback (`current` picks latest overall, `conversations` returns `[]`), and populate `schemaVersion: 2`, `serviceStatus`, `current.kind`, and `conversations[]` fields (`kind`, `turnCount`, `projectId`, `parentConversationId`).
+    6.  **`getContextSnapshot({ conversationId, limit = 35, includeSubagents = false, includeDetails = true, workspacePath, mcpRoots, geminiHome } = {})`**: Accept `includeDetails = true` (passing it to `analyzeTranscriptRows` and gating `scanConversationArtifacts`), await `mcpRoots` (allowing callers to pass a `Promise` to overlap `resolveMcpRoots` with `fetchConversationServiceTitles`), enforce `isSafeSingleSegment(conversationId)` (setting `requestedConversationFound: false` on invalid IDs without reading outside `brain/`/`annotations/`), implement zero-interactive fallback (`current` picks latest overall, `conversations` returns `[]`), and populate `schemaVersion: 2`, `serviceStatus`, `current.kind`, and `conversations[]` fields (`kind`, `turnCount`, `projectId`, `parentConversationId`).
 
-#### 2. `src/server.mjs` (Modify)
+#### 2. [`src/server.mjs`](../../src/server.mjs) (Modify)
 
 *   **Type / Scope**: MCP stdio server tool registration, capability queries, and response formatting.
 *   **Rationale**: Exposes v2 parameters, resolves and conditionally caches MCP `roots/list`, and updates text summaries.
@@ -374,7 +374,7 @@ Note: `plugin.json` is excluded from Spec 1 edits because release version string
         *   On the full summary (`cur && cur.hasUsageData`), add `Tracked conversations: ${snapshot.conversations.length} shown / ${snapshot.totalTrackedConversations} tracked`.
         *   On all three return branches (including `!cur` and `!cur.hasUsageData`), append `\nConversationService: offline (${serviceStatus.reason})` when `serviceStatus && !serviceStatus.reachable` or `\nConversationService: partial (${serviceStatus.enrichedCount} enriched)` when `serviceStatus?.reason === "partial"`.
 
-#### 3. `src/ui/main.js` (Modify)
+#### 3. [`src/ui/main.js`](../../src/ui/main.js) (Modify)
 
 *   **Type / Scope**: Scoped v0.1.0 side-panel compatibility sync (full v2 UI deferred to Spec 2).
 *   **Rationale**: Keeps segment tooltips working after `checkpoint_summary` (the v0.1.0 checkpoint segment ID) is replaced by `checkpoint_buffer` and surfaces workspace skill counts in `skills-scope` (the UI text slot summarizing skill counts by scope).
@@ -382,20 +382,20 @@ Note: `plugin.json` is excluded from Spec 1 edits because release version string
     1.  Update tooltip checks in `patchInPlace` and `render` to show and patch segment tooltips whenever `Boolean(seg.detail)` is true, removing the hardcoded `seg.id === "baseline" || seg.id === "checkpoint_summary"` allowlist.
     2.  Update `skills-scope` in `patchInPlace` and `render` to append `, ${skillsInfo.byScope.workspace} workspace` whenever `skillsInfo.byScope?.workspace > 0`, and include `inventory.skills?.byScope` in `computeSnapshotFingerprint`.
 
-#### 4. `src/ui/styles.css` (Modify)
+#### 4. [`src/ui/styles.css`](../../src/ui/styles.css) (Modify)
 
 *   **Type / Scope**: Scoped v0.1.0 side-panel CSS compatibility fix.
 *   **Rationale**: Prevents `Agent responses` (`colorKey: "amber"`) and `Checkpoint buffer` (`colorKey: "violet"`) from rendering identically in violet.
 *   **Proposed Changes**:
     *   Define `--seg-amber: #f59e0b;` once on `:root` alongside the existing `--seg-*` tokens, and split `.swatch-amber, .bar-amber` into their own rule using `background: var(--seg-amber);` instead of `var(--seg-violet)`.
 
-#### 5. `scripts/test-analyzer.mjs` (Create)
+#### 5. [`scripts/test-analyzer.mjs`](../../scripts/test-analyzer.mjs) (Create)
 
 *   **Type / Scope**: Pure unit fixture tests for `src/analyzer.mjs` using `node:test`.
 *   **Rationale**: Validates v2 analyzer invariants directly in Phase 1A against isolated temporary directories (`fs.mkdtempSync` via `CONTEXT_MONITOR_GEMINI_HOME`, cleaned up in `finally`) without touching `~/.gemini` or starting stdio transports.
 *   **Proposed Changes**:
     *   Add unit test suites covering:
-        1.  Annotation-gated classification (`interactive`, `subagent` via `parentConversationId`, `background`), `includeSubagents` toggling, zero-interactive fallback, explicit subagent `conversationId` inspection, and `conversationId` path-traversal rejection (`../`, `/`, `\`, null byte).
+        1.  Annotation-gated classification (`interactive`, `subagent` via `parentConversationId`, `background`), `includeSubagents` toggling, zero-interactive fallback, explicit `subagent` and `background` `conversationId` inspection, and `conversationId` path-traversal rejection (`../`, `/`, `\`, null byte).
         2.  CLI breakdown allocation (all 6 segments, zero-weight fallback, `initialMessagesEst` offset, `effectiveCheckpointIdx` trailing-checkpoint handling, `rows[anchorIdx]` inclusion/exclusion), cumulative session counters, and `cacheInvalidationCount`.
         3.  `trajectory` bounding on a 150-turn, 2-checkpoint transcript (`isBounded: true`), on a 150-turn, 0-checkpoint transcript (`isBounded: true`), and on trailing checkpoints.
         4.  `topTools` positional pairing, diverged-batch weighting, non-contiguous `GENERIC` batch scan, exclusion of `GENERIC` rows past `latestPlannerIdx`, and 1-turn empty array handling.
@@ -403,7 +403,7 @@ Note: `plugin.json` is excluded from Spec 1 edits because release version string
         6.  `config.json` plugin precedence (`true` over `disabled: true`, `false` over active `plugin.json`), direct `projects/<projectId>.json` resolution + fall-through, and workspace `.agents`/`.agent`/`_agents`/`_agent` rules (`overPerFileCap`, `rules.items` pre-slice sort, symlink escape guard) + skills (`byScope.workspace`).
         7.  `fetchConversationServiceTitles` (`missing_env`, mock HTTP `ok`, page-2 `partial` retention, `http_error`, and `350 ms` timeout).
 
-#### 6. `scripts/test-server.mjs` (Modify)
+#### 6. [`scripts/test-server.mjs`](../../scripts/test-server.mjs) (Modify)
 
 *   **Type / Scope**: Live MCP stdio integration tests against `dist/server.mjs`.
 *   **Rationale**: Validates compiled MCP tool schemas, payload budgets, `open_context_monitor` vs `get_context_snapshot` detail isolation, and real MCP SDK `roots/list` timeout/invalidation in Phase 1B.
@@ -412,14 +412,14 @@ Note: `plugin.json` is excluded from Spec 1 edits because release version string
     2.  When `snap.current?.hasUsageData` is true, assert segment/percentage sum invariants, confirm `open_context_monitor` omits `current.trajectory`, `current.topTools`, and `current.artifacts`, and confirm `get_context_snapshot` populates them.
     3.  Add a dedicated stdio `Client` test advertising `capabilities: { roots: { listChanged: true } }` with a mock `ListRootsRequestSchema` handler verifying: (a) fast `roots/list` resolution and `listChanged` caching, (b) `notifications/roots/list_changed` invalidation, and (c) `> 250 ms` delayed response falling back to `[]` without caching the timeout.
 
-#### 7. `package.json` (Modify)
+#### 7. [`package.json`](../../package.json) (Modify)
 
 *   **Type / Scope**: Test runner script update (version stays `"0.1.0"`).
 *   **Rationale**: Runs pure `node:test` analyzer suites before live compiled stdio integration tests.
 *   **Proposed Changes**:
     *   Update `"scripts.test"` to `"node --test scripts/test-analyzer.mjs && node scripts/test-server.mjs"`, leaving `"version": "0.1.0"` unchanged.
 
-#### 8. `README.md` (Modify)
+#### 8. [`README.md`](../../README.md) (Modify)
 
 *   **Type / Scope**: Plugin documentation.
 *   **Rationale**: Documents v2 metrics, CLI-aligned categories, workspace discovery inputs, and runtime sync exclusions.
@@ -443,4 +443,4 @@ Note: `plugin.json` is excluded from Spec 1 edits because release version string
 *   **Compilation / Build**: `npm run build` exits 0 and emits `dist/app.html` and `dist/server.mjs`.
 *   **Full Test Suite**: `npm test` exits 0, passing both `scripts/test-analyzer.mjs` and `scripts/test-server.mjs` (confirming `structuredContent` and full serialized `CallToolResult` payloads stay `< 1 MiB`, `roots/list` timeout/invalidation works, and every segment/percentage sum invariant holds).
 *   **Static Validation**: `agy plugin validate . --strict` passes with zero errors.
-*   **Sync Safety (Pre-Sync Diff Gate)**: Show `git status` / diffs and explicit sync commands (copying `dist/`, `plugin.json`, `mcp_config.json`, `assets/`, `README.md` while excluding `docs/`, `src/`, `scripts/`, `node_modules/`) to the user before updating `~/.gemini/config/plugins/context-monitor/` and refreshing `context-monitor_context-monitor`.
+*   **Sync Safety (Pre-Sync Diff Gate)**: Show `diff -rq` / file diffs between the staged runtime bundle and `~/.gemini/config/plugins/context-monitor/` and explicit sync commands (copying `dist/`, `plugin.json`, `mcp_config.json`, `assets/`, `README.md` while excluding `docs/`, `src/`, `scripts/`, `node_modules/`) to the user before updating `~/.gemini/config/plugins/context-monitor/` and refreshing `context-monitor_context-monitor`.

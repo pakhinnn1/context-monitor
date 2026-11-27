@@ -172,6 +172,16 @@ describe("Suite 1: Classification, gating, summaryCache freshness, and path safe
           assert.equal(snapExplicitBg.selectedConversationId, "bg-1");
           assert.equal(snapExplicitBg.current.kind, "background");
 
+          // Explicit inspection of subagent thread works even when includeSubagents=false
+          const snapExplicitSub = await getContextSnapshot({
+            geminiHome,
+            conversationId: "sub-1",
+          });
+          assert.equal(snapExplicitSub.requestedConversationFound, true);
+          assert.equal(snapExplicitSub.selectedConversationId, "sub-1");
+          assert.equal(snapExplicitSub.current.kind, "subagent");
+          assert.equal(snapExplicitSub.conversations.length, 1);
+
           // Traversal conversationId sets requestedConversationFound=false
           const snapBadId = await getContextSnapshot({
             geminiHome,
